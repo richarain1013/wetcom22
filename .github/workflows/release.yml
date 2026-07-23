@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            args: ""
+            name: windows
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+            name: macos-arm64
+          - platform: macos-latest
+            args: --target x86_64-apple-darwin
+            name: macos-x64
+
+    runs-on: ${{ matrix.platform }}
+    name: build-${{ matrix.name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('ci-{0}', github.run_id) }}
+          releaseName: WeCom Launcher ${{ github.ref_type == 'tag' && github.ref_name || format('ci-{0}', github.run_id) }}
+          releaseBody: |
+            ## Downloads
+            - **Windows**: install `.msi` or `*-setup.exe`, then open WeCom Launcher
+            - **macOS**: open `.dmg` or drag `.app` to Applications
+
+            See `docs/WINDOWS.md` for usage on Windows.
+          releaseDraft: ${{ github.ref_type != 'tag' }}
+          prerelease: false
+          args: ${{ matrix.args }}
+          includeUpdaterJson: false

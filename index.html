@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>企业微信多账号启动器</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="header">
+        <div>
+          <h1>企业微信多账号启动器</h1>
+          <p class="sub">Windows + macOS · 零注入 · 分批启动（建议 8–10）</p>
+        </div>
+        <div class="meta">
+          <span id="platformBadge">—</span>
+          <span id="statusText">就绪</span>
+        </div>
+      </header>
+
+      <section class="panel">
+        <label class="field">
+          <span>企业微信路径</span>
+          <div class="row">
+            <input id="appPath" type="text" placeholder="自动检测中…" />
+            <button id="btnDetect" type="button" class="ghost">自动检测</button>
+            <button id="btnBrowse" type="button" class="ghost">浏览</button>
+          </div>
+        </label>
+
+        <div class="row wrap">
+          <label class="inline">
+            批量数量
+            <input id="batchCount" type="number" min="1" max="10" value="8" />
+            <span class="muted">/ 10</span>
+          </label>
+          <label class="inline">
+            启动间隔(ms)
+            <input id="minDelay" type="number" min="500" value="2500" />
+            –
+            <input id="maxDelay" type="number" min="500" value="6000" />
+          </label>
+          <label class="inline" id="winOpt">
+            <input id="preferRegistry" type="checkbox" checked />
+            Windows：优先注册表 multi_instances
+          </label>
+          <label class="inline" id="macOpt">
+            <input id="macosClone" type="checkbox" checked />
+            macOS：克隆 .app（更适合 8–10 开）
+          </label>
+        </div>
+
+        <div class="row actions">
+          <button id="btnOne" type="button">新开 1 个</button>
+          <button id="btnBatch" type="button">分批启动</button>
+          <button id="btnRefresh" type="button" class="ghost">刷新进程</button>
+          <button id="btnKill" type="button" class="danger">全部关闭</button>
+          <span class="muted">运行中：<strong id="runningCount">0</strong></span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>账号槽位</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>别名</th>
+              <th>状态</th>
+              <th>PID</th>
+              <th>消息</th>
+            </tr>
+          </thead>
+          <tbody id="slotsBody"></tbody>
+        </table>
+      </section>
+
+      <section class="panel log-panel">
+        <h2>运行日志</h2>
+        <ul id="logs"></ul>
+      </section>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

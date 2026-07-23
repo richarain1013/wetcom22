@@ -1,0 +1,10 @@
+node_modules/
+dist/
+src-tauri/target/
+.cargo/
+.rustup/
+.DS_Store
+*.log
+legacy-wpf/**/bin/
+legacy-wpf/**/obj/
+dist-app/
