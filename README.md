@@ -7,7 +7,8 @@
 - **macOS**：见下方「开发环境」；已打包的 `.app` 在 `dist-app/` 或「应用程序」
 - **Windows**：用 GitHub Actions 打安装包（推荐），见 **[docs/WINDOWS.md](docs/WINDOWS.md)**  
   - Actions → **Release** → Run workflow，或 `git tag v0.1.0 && git push --tags`  
-  - 在 Releases 下载 `.msi` / `setup.exe` 拷到 Windows 安装
+  - 在 Releases 下载 `.msi` / `setup.exe` 拷到 Windows 安装  
+- **安全模式 / 分档 / 虚拟机**：见 [SAFE_MODE.md](docs/SAFE_MODE.md)、[VM_GUIDE.md](docs/VM_GUIDE.md)
 
 ## 平台差异
 

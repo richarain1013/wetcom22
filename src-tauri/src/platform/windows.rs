@@ -200,6 +200,75 @@ pub fn list_safe_mode_users(count: u8, prefix: &str) -> Vec<crate::models::SafeM
         .collect()
 }
 
+/// `net session` succeeds only when the process is elevated.
+pub fn is_elevated() -> bool {
+    Command::new("net")
+        .arg("session")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+pub fn check_safe_mode_health(
+    count: u8,
+    prefix: &str,
+    password: Option<&str>,
+) -> crate::models::SafeModeHealth {
+    use crate::models::SafeModeHealth;
+    use crate::policy::clamp_count;
+
+    let count = clamp_count(count);
+    let users = list_safe_mode_users(count, prefix);
+    let missing_users: Vec<String> = users
+        .iter()
+        .filter(|u| !u.exists)
+        .map(|u| u.username.clone())
+        .collect();
+
+    let is_admin = is_elevated();
+    let password_ok = password
+        .map(str::trim)
+        .filter(|s| s.len() >= 8)
+        .is_some();
+
+    let mut warnings = Vec::new();
+    if !is_admin {
+        warnings.push("当前未以管理员运行：准备本地用户可能失败，建议右键「以管理员身份运行」。".into());
+    }
+    if !password_ok {
+        warnings.push("本地用户密码未填或不足 8 位。".into());
+    }
+    if !missing_users.is_empty() {
+        warnings.push(format!(
+            "缺少本地用户：{}。请先点「准备本地用户」。",
+            missing_users.join(", ")
+        ));
+    }
+
+    let ready = missing_users.is_empty() && password_ok;
+    let summary = if ready {
+        format!(
+            "安全模式校验通过：{}/{} 用户已就绪{}",
+            users.len() - missing_users.len(),
+            users.len(),
+            if is_admin { "，管理员权限正常" } else { "（非管理员，启动通常仍可用）" }
+        )
+    } else {
+        format!("安全模式未就绪：{}", warnings.join(" "))
+    };
+
+    SafeModeHealth {
+        platform_ok: true,
+        is_admin,
+        password_ok,
+        users,
+        missing_users,
+        ready,
+        warnings,
+        summary,
+    }
+}
+
 fn local_user_exists(username: &str) -> bool {
     let output = Command::new("net")
         .args(["user", username])

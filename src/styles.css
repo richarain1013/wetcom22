@@ -152,3 +152,62 @@ td input {
 .badge.running { background: #d1fadf; color: #067647; }
 .badge.error { background: #fee4e2; color: #b42318; }
 .badge.idle { background: #f2f4f7; color: #475467; }
+.badge.primary { background: #fef0c7; color: #93370d; }
+.badge.secondary { background: #e0f2fe; color: #075985; }
+.badge.test { background: #f4f3ff; color: #5925dc; }
+
+select.tier-select {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+  background: #fff;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 50;
+}
+.modal.hidden { display: none; }
+.modal-card {
+  background: #fff;
+  border-radius: 12px;
+  max-width: 640px;
+  width: 100%;
+  padding: 20px;
+  box-shadow: 0 20px 40px rgba(0,0,0,.18);
+  max-height: 90vh;
+  overflow: auto;
+}
+.modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.modal-head h2 { margin: 0; font-size: 18px; }
+.wizard-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.wizard-steps p { margin: 4px 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.wizard-note {
+  margin-top: 16px;
+  padding: 12px;
+  background: #f8fafc;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #334155;
+}
+#safeHealth.ok { color: #067647; }
+#safeHealth.bad { color: #b42318; }

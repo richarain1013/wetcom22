@@ -3,10 +3,10 @@ mod platform;
 mod policy;
 
 use models::{
-    AppInfo, BatchResult, LaunchOptions, LaunchResult, SafeModePrepareRequest,
-    SafeModePrepareResult, SafeModeUserStatus,
+    AppInfo, BatchResult, LaunchOptions, LaunchResult, SafeModeHealth, SafeModeHealthRequest,
+    SafeModePrepareRequest, SafeModePrepareResult, SafeModeUserStatus, TierPreset,
 };
-use policy::{clamp_count, LaunchPolicy};
+use policy::{clamp_count, tier_presets, LaunchPolicy};
 
 #[tauri::command]
 fn get_app_info(app_path: Option<String>) -> AppInfo {
@@ -17,6 +17,7 @@ fn get_app_info(app_path: Option<String>) -> AppInfo {
         resolved_path: resolved.map(|p| p.to_string_lossy().into_owned()),
         running_count: pids.len(),
         running_pids: pids,
+        is_admin: platform::is_elevated(),
     }
 }
 
@@ -46,13 +47,13 @@ async fn launch_batch_inner(options: LaunchOptions) -> Result<BatchResult, Strin
         return Err("安全模式仅支持 Windows".into());
     }
     if options.windows_safe_mode {
-        let pw = options
-            .safe_mode_password
-            .as_deref()
-            .map(str::trim)
-            .unwrap_or("");
-        if pw.is_empty() {
-            return Err("已开启安全模式，请填写本地用户密码".into());
+        let health = platform::check_safe_mode_health(
+            options.count,
+            &options.safe_mode_user_prefix,
+            options.safe_mode_password.as_deref(),
+        );
+        if !health.ready {
+            return Err(health.summary);
         }
     }
 
@@ -64,12 +65,21 @@ async fn launch_batch_inner(options: LaunchOptions) -> Result<BatchResult, Strin
     let mut results = Vec::with_capacity(count as usize);
 
     for i in 1..=count {
-        policy.wait_before_next().await;
+        if options.use_tier_delays {
+            policy.wait_for_tier(options.tier_for_index(i)).await;
+        } else {
+            policy.wait_before_next().await;
+        }
 
         match platform::prepare_next_instance(&options) {
             Ok(msg) => {
+                let tier = options.tier_for_index(i);
                 let mut one = platform::spawn_instance(&app, i, &options)?;
-                one.message = format!("{msg} | {}", one.message);
+                one.message = format!(
+                    "{msg} | [{}] {}",
+                    tier.label(),
+                    one.message
+                );
                 let ok = one.success;
                 results.push(one);
                 if !ok {
@@ -115,6 +125,16 @@ fn list_safe_mode_users(count: u8, user_prefix: Option<String>) -> Vec<SafeModeU
     platform::list_safe_mode_users(count, &prefix)
 }
 
+#[tauri::command]
+fn check_safe_mode_health(req: SafeModeHealthRequest) -> SafeModeHealth {
+    platform::check_safe_mode_health(req.count, &req.user_prefix, req.password.as_deref())
+}
+
+#[tauri::command]
+fn get_tier_presets() -> Vec<TierPreset> {
+    tier_presets()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -128,7 +148,9 @@ pub fn run() {
             list_running,
             kill_all,
             prepare_safe_mode_users,
-            list_safe_mode_users
+            list_safe_mode_users,
+            check_safe_mode_health,
+            get_tier_presets
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

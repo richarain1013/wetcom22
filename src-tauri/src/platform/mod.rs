@@ -48,3 +48,28 @@ pub fn list_safe_mode_users(
         })
         .collect()
 }
+
+#[cfg(not(target_os = "windows"))]
+pub fn is_elevated() -> bool {
+    false
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn check_safe_mode_health(
+    count: u8,
+    prefix: &str,
+    password: Option<&str>,
+) -> crate::models::SafeModeHealth {
+    use crate::models::SafeModeHealth;
+    let users = list_safe_mode_users(count, prefix);
+    SafeModeHealth {
+        platform_ok: false,
+        is_admin: false,
+        password_ok: password.map(str::trim).filter(|s| s.len() >= 8).is_some(),
+        users,
+        missing_users: Vec::new(),
+        ready: false,
+        warnings: vec!["安全模式仅支持 Windows".into()],
+        summary: "当前平台不支持安全模式".into(),
+    }
+}

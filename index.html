@@ -10,15 +10,26 @@
       <header class="header">
         <div>
           <h1>企业微信多账号启动器</h1>
-          <p class="sub">Windows + macOS · 零注入 · 分批启动（建议 8–10）</p>
+          <p class="sub">零注入 · 安全模式 · 分档策略 · 建议主号用虚拟机</p>
         </div>
         <div class="meta">
           <span id="platformBadge">—</span>
+          <span id="adminBadge" class="badge idle">权限检测中</span>
           <span id="statusText">就绪</span>
         </div>
       </header>
 
       <section class="panel">
+        <div class="row wrap" style="margin-bottom:12px">
+          <strong>分档模板</strong>
+          <button id="btnPresetPrimary" type="button" class="ghost">主号模板</button>
+          <button id="btnPresetSecondary" type="button" class="ghost">辅号模板</button>
+          <button id="btnPresetMixed" type="button" class="ghost">主+辅混合</button>
+          <button id="btnPresetTest" type="button" class="ghost">测试模板</button>
+          <button id="btnOpenWizard" type="button">隔离向导</button>
+          <span class="muted" id="presetHint">选择模板可自动设置数量、间隔与槽位分档</span>
+        </div>
+
         <label class="field">
           <span>企业微信路径</span>
           <div class="row">
@@ -39,6 +50,10 @@
             <input id="minDelay" type="number" min="500" value="2500" />
             –
             <input id="maxDelay" type="number" min="500" value="6000" />
+          </label>
+          <label class="inline">
+            <input id="useTierDelays" type="checkbox" checked />
+            按分档使用间隔（主号更慢）
           </label>
           <label class="inline" id="winOpt">
             <input id="preferRegistry" type="checkbox" checked />
@@ -64,8 +79,9 @@
             <input id="safePassword" type="password" placeholder="至少 8 位" style="width:140px" />
           </label>
           <button id="btnPrepareUsers" type="button" class="ghost">准备本地用户</button>
+          <button id="btnValidateSafe" type="button" class="ghost">一键校验</button>
           <button id="btnRefreshUsers" type="button" class="ghost">刷新用户状态</button>
-          <span class="muted">槽位用户名：前缀+编号，如 WeComSlot1</span>
+          <span id="safeHealth" class="muted">未校验</span>
         </div>
 
         <div class="row actions">
@@ -84,6 +100,7 @@
             <tr>
               <th>#</th>
               <th>别名</th>
+              <th>分档</th>
               <th>本地用户</th>
               <th>状态</th>
               <th>PID</th>
@@ -99,6 +116,37 @@
         <ul id="logs"></ul>
       </section>
     </div>
+
+    <div id="wizardModal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h2>隔离向导：如何降低同机多号风险</h2>
+          <button id="btnCloseWizard" type="button" class="ghost">关闭</button>
+        </div>
+        <ol class="wizard-steps">
+          <li>
+            <strong>主号 → 虚拟机（最推荐）</strong>
+            <p>一台 VM 只登一个企微账号。Hyper-V / VMware / VirtualBox 均可。详见仓库 <code>docs/VM_GUIDE.md</code>。</p>
+          </li>
+          <li>
+            <strong>辅号 → 本机安全模式</strong>
+            <p>勾选「安全模式」→ 管理员运行 → 准备 WeComSlot 用户 → 用「辅号模板」分批启动。</p>
+          </li>
+          <li>
+            <strong>测试号 → 普通多开</strong>
+            <p>用「测试模板」验证多开是否可用，不要把主号放在测试环境。</p>
+          </li>
+          <li>
+            <strong>行为收敛</strong>
+            <p>保持分档间隔；避免短时间杀进程再秒开；不要用脚本做群发/加好友。</p>
+          </li>
+        </ol>
+        <div class="wizard-note">
+          本工具做环境与配置隔离，<strong>不会伪造设备指纹</strong>。服务端仍可能关联同物理机。
+        </div>
+      </div>
+    </div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
