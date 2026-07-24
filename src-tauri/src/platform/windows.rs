@@ -364,7 +364,7 @@ fn spawn_as_local_user(
             PCWSTR(pass_w.as_ptr()),
             LOGON_WITH_PROFILE,
             PCWSTR(app_w.as_ptr()),
-            Some(PWSTR(cmd_w.as_mut_ptr())),
+            PWSTR(cmd_w.as_mut_ptr()),
             CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE,
             None,
             PCWSTR(dir_w.as_ptr()),
