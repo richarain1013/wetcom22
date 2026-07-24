@@ -35,7 +35,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install Rust stable
@@ -56,15 +56,29 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('ci-{0}', github.run_id) }}
-          releaseName: WeCom Launcher ${{ github.ref_type == 'tag' && github.ref_name || format('ci-{0}', github.run_id) }}
+          # Manual runs create a published release so Assets are visible without hunting drafts.
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('ci-{0}', github.run_number) }}
+          releaseName: WeCom Launcher ${{ github.ref_type == 'tag' && github.ref_name || format('ci-{0}', github.run_number) }}
           releaseBody: |
             ## Downloads
-            - **Windows**: install `.msi` or `*-setup.exe`, then open WeCom Launcher
-            - **macOS**: open `.dmg` or drag `.app` to Applications
+            - **Windows**: `*-setup.exe` or `*.msi`
+            - **macOS**: `*.dmg`
 
-            See `docs/WINDOWS.md` for usage on Windows.
-          releaseDraft: ${{ github.ref_type != 'tag' }}
-          prerelease: false
+            See `docs/WINDOWS.md` for usage.
+          releaseDraft: false
+          prerelease: ${{ github.ref_type != 'tag' }}
           args: ${{ matrix.args }}
           includeUpdaterJson: false
+
+      - name: Upload installers (Actions Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: wecom-launcher-${{ matrix.name }}
+          path: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/*/release/bundle/dmg/*.dmg
+            src-tauri/target/*/release/bundle/macos/*.app
+          if-no-files-found: warn
+          retention-days: 30
