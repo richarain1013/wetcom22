@@ -12,6 +12,7 @@
 - 优先软写 `HKCU\...\multi_instances`  
 - 再进程外 `DuplicateHandle(DUPLICATE_CLOSE_SOURCE)` 释放 ExclusiveObject  
 - 失败时提示提权，默认不以管理员常驻  
+- **安全模式（推荐加强）**：每槽位一个本地用户（`WeComSlotN`），`CreateProcessWithLogonW` 拉起企微，配置目录隔离。详见 [SAFE_MODE.md](./SAFE_MODE.md)  
 
 ## macOS
 
@@ -24,5 +25,6 @@
 | 目标 | 能否保证 |
 |------|----------|
 | 同机多窗口登录 | 多数版本可以 |
+| 客户端配置隔离（安全模式） | 可以（分用户 Profile） |
 | 客户端不报外挂 | 大概率（无注入） |
 | 服务端不关联同设备 | **不能保证** |

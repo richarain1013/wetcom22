@@ -44,10 +44,28 @@
             <input id="preferRegistry" type="checkbox" checked />
             Windows：优先注册表 multi_instances
           </label>
+          <label class="inline" id="winSafeOpt">
+            <input id="windowsSafeMode" type="checkbox" />
+            Windows 安全模式（本地用户隔离）
+          </label>
           <label class="inline" id="macOpt">
             <input id="macosClone" type="checkbox" checked />
             macOS：克隆 .app（更适合 8–10 开）
           </label>
+        </div>
+
+        <div class="row wrap" id="safeModePanel" style="display:none">
+          <label class="inline">
+            用户前缀
+            <input id="safePrefix" type="text" value="WeComSlot" style="width:110px" />
+          </label>
+          <label class="inline">
+            本地用户密码
+            <input id="safePassword" type="password" placeholder="至少 8 位" style="width:140px" />
+          </label>
+          <button id="btnPrepareUsers" type="button" class="ghost">准备本地用户</button>
+          <button id="btnRefreshUsers" type="button" class="ghost">刷新用户状态</button>
+          <span class="muted">槽位用户名：前缀+编号，如 WeComSlot1</span>
         </div>
 
         <div class="row actions">
@@ -66,6 +84,7 @@
             <tr>
               <th>#</th>
               <th>别名</th>
+              <th>本地用户</th>
               <th>状态</th>
               <th>PID</th>
               <th>消息</th>

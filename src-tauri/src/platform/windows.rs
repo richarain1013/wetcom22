@@ -72,6 +72,11 @@ fn try_enable_multi_instances(max: u32) -> bool {
 }
 
 pub fn prepare_next_instance(opts: &LaunchOptions) -> Result<String, String> {
+    if opts.windows_safe_mode {
+        // Per-user profiles still share the interactive session mutex namespace on many builds.
+        let release = release_wecom_mutexes()?;
+        return Ok(format!("安全模式准备 | {release}"));
+    }
     if opts.prefer_registry {
         let _ = try_enable_multi_instances(crate::models::MAX_SLOTS as u32);
     }
@@ -81,8 +86,12 @@ pub fn prepare_next_instance(opts: &LaunchOptions) -> Result<String, String> {
 pub fn spawn_instance(
     app_path: &Path,
     index: u8,
-    _opts: &LaunchOptions,
+    opts: &LaunchOptions,
 ) -> Result<LaunchResult, String> {
+    if opts.windows_safe_mode {
+        return spawn_as_local_user(app_path, index, opts);
+    }
+
     let workdir = app_path
         .parent()
         .map(|p| p.to_path_buf())
@@ -107,6 +116,221 @@ pub fn spawn_instance(
             message: format!("启动失败: {e}"),
             index,
         }),
+    }
+}
+
+/// Create local users WeComSlot1..N if missing. Requires administrator.
+pub fn ensure_safe_mode_users(
+    count: u8,
+    password: &str,
+    prefix: &str,
+) -> Result<crate::models::SafeModePrepareResult, String> {
+    use crate::models::{SafeModePrepareResult, MAX_SLOTS};
+    use crate::policy::clamp_count;
+
+    if password.trim().len() < 8 {
+        return Err("安全模式密码至少 8 位（需满足 Windows 密码策略）".into());
+    }
+
+    let count = clamp_count(count);
+    let prefix = if prefix.trim().is_empty() {
+        crate::models::DEFAULT_SAFE_USER_PREFIX
+    } else {
+        prefix.trim()
+    };
+
+    let mut created = Vec::new();
+    let mut already_existed = Vec::new();
+    let mut failed = Vec::new();
+
+    for i in 1..=count.min(MAX_SLOTS) {
+        let username = format!("{prefix}{i}");
+        if local_user_exists(&username) {
+            already_existed.push(username);
+            continue;
+        }
+        match create_local_user(&username, password) {
+            Ok(()) => created.push(username),
+            Err(e) => failed.push(format!("{username}: {e}")),
+        }
+    }
+
+    let message = if failed.is_empty() {
+        format!(
+            "安全模式用户就绪：新建 {}，已存在 {}。请以管理员运行启动器。",
+            created.len(),
+            already_existed.len()
+        )
+    } else {
+        format!(
+            "部分失败（通常需要管理员权限）: {}",
+            failed.join("; ")
+        )
+    };
+
+    Ok(SafeModePrepareResult {
+        created,
+        already_existed,
+        failed,
+        message,
+    })
+}
+
+pub fn list_safe_mode_users(count: u8, prefix: &str) -> Vec<crate::models::SafeModeUserStatus> {
+    use crate::models::{SafeModeUserStatus, DEFAULT_SAFE_USER_PREFIX, MAX_SLOTS};
+    use crate::policy::clamp_count;
+
+    let count = clamp_count(count).min(MAX_SLOTS);
+    let prefix = if prefix.trim().is_empty() {
+        DEFAULT_SAFE_USER_PREFIX
+    } else {
+        prefix.trim()
+    };
+
+    (1..=count)
+        .map(|index| {
+            let username = format!("{prefix}{index}");
+            let exists = local_user_exists(&username);
+            SafeModeUserStatus {
+                index,
+                username,
+                exists,
+            }
+        })
+        .collect()
+}
+
+fn local_user_exists(username: &str) -> bool {
+    let output = Command::new("net")
+        .args(["user", username])
+        .output();
+    matches!(output, Ok(o) if o.status.success())
+}
+
+fn create_local_user(username: &str, password: &str) -> Result<(), String> {
+    // net user is the most portable admin path; requires elevated launcher.
+    let add = Command::new("net")
+        .args(["user", username, password, "/add", "/fullnamepasswordchg:yes", "/expires:never"])
+        .output()
+        .map_err(|e| format!("执行 net user 失败: {e}"))?;
+
+    if !add.status.success() {
+        let stderr = String::from_utf8_lossy(&add.stderr);
+        let stdout = String::from_utf8_lossy(&add.stdout);
+        return Err(format!(
+            "创建用户失败（请以管理员运行）: {} {}",
+            stdout.trim(),
+            stderr.trim()
+        ));
+    }
+
+    // Ensure Users group membership (usually automatic, but be explicit).
+    let _ = Command::new("net")
+        .args(["localgroup", "Users", username, "/add"])
+        .output();
+
+    Ok(())
+}
+
+fn spawn_as_local_user(
+    app_path: &Path,
+    index: u8,
+    opts: &LaunchOptions,
+) -> Result<LaunchResult, String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        CreateProcessWithLogonW, CREATE_NEW_CONSOLE, CREATE_UNICODE_ENVIRONMENT, LOGON_WITH_PROFILE,
+        PROCESS_INFORMATION, STARTUPINFOW,
+    };
+
+    let password = opts
+        .safe_mode_password
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "安全模式需要填写本地用户密码".to_string())?;
+
+    let username = opts.safe_username(index);
+    if !local_user_exists(&username) {
+        return Ok(LaunchResult {
+            success: false,
+            pid: None,
+            message: format!(
+                "本地用户 {username} 不存在。请先点「准备本地用户」（需管理员）"
+            ),
+            index,
+        });
+    }
+
+    let workdir = app_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    fn to_wide(s: &str) -> Vec<u16> {
+        std::ffi::OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    let mut user_w = to_wide(&username);
+    let mut domain_w = to_wide(".");
+    let mut pass_w = to_wide(password);
+    let mut app_w = to_wide(&app_path.to_string_lossy());
+    // Command line must be mutable for CreateProcess*
+    let mut cmd_w = to_wide(&format!("\"{}\"", app_path.to_string_lossy()));
+    let mut dir_w = to_wide(&workdir.to_string_lossy());
+
+    unsafe {
+        let mut si = STARTUPINFOW::default();
+        si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut pi = PROCESS_INFORMATION::default();
+
+        let ok = CreateProcessWithLogonW(
+            PCWSTR(user_w.as_ptr()),
+            PCWSTR(domain_w.as_ptr()),
+            PCWSTR(pass_w.as_ptr()),
+            LOGON_WITH_PROFILE,
+            PCWSTR(app_w.as_ptr()),
+            Some(PWSTR(cmd_w.as_mut_ptr())),
+            CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE,
+            None,
+            PCWSTR(dir_w.as_ptr()),
+            &si,
+            &mut pi,
+        );
+
+        // Best-effort wipe password buffer
+        for b in pass_w.iter_mut() {
+            *b = 0;
+        }
+
+        match ok {
+            Ok(()) => {
+                let pid = pi.dwProcessId;
+                let _ = CloseHandle(pi.hThread);
+                let _ = CloseHandle(pi.hProcess);
+                Ok(LaunchResult {
+                    success: true,
+                    pid: Some(pid),
+                    message: format!(
+                        "安全模式已启动 #{index} 用户={username} PID={pid}"
+                    ),
+                    index,
+                })
+            }
+            Err(e) => Ok(LaunchResult {
+                success: false,
+                pid: None,
+                message: format!(
+                    "以用户 {username} 启动失败: {e}（检查密码、用户是否存在、是否被策略禁止）"
+                ),
+                index,
+            }),
+        }
     }
 }
 

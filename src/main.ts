@@ -9,6 +9,9 @@ type LaunchOptions = {
   maxDelayMs: number;
   preferRegistry: boolean;
   macosCloneInstances: boolean;
+  windowsSafeMode: boolean;
+  safeModePassword: string | null;
+  safeModeUserPrefix: string;
 };
 
 type LaunchResult = {
@@ -30,9 +33,17 @@ type AppInfo = {
   runningPids: number[];
 };
 
+type SafeModeUserStatus = {
+  index: number;
+  username: string;
+  exists: boolean;
+};
+
 type Slot = {
   index: number;
   alias: string;
+  username: string;
+  userExists: boolean;
   status: "idle" | "running" | "error";
   pid: number | null;
   message: string;
@@ -42,6 +53,8 @@ const MAX = 10;
 const slots: Slot[] = Array.from({ length: MAX }, (_, i) => ({
   index: i + 1,
   alias: `账号 ${i + 1}`,
+  username: `WeComSlot${i + 1}`,
+  userExists: false,
   status: "idle",
   pid: null,
   message: "",
@@ -55,8 +68,13 @@ const els = {
   minDelay: document.getElementById("minDelay") as HTMLInputElement,
   maxDelay: document.getElementById("maxDelay") as HTMLInputElement,
   preferRegistry: document.getElementById("preferRegistry") as HTMLInputElement,
+  windowsSafeMode: document.getElementById("windowsSafeMode") as HTMLInputElement,
+  safePrefix: document.getElementById("safePrefix") as HTMLInputElement,
+  safePassword: document.getElementById("safePassword") as HTMLInputElement,
   macosClone: document.getElementById("macosClone") as HTMLInputElement,
   winOpt: document.getElementById("winOpt")!,
+  winSafeOpt: document.getElementById("winSafeOpt")!,
+  safeModePanel: document.getElementById("safeModePanel")!,
   macOpt: document.getElementById("macOpt")!,
   runningCount: document.getElementById("runningCount")!,
   slotsBody: document.getElementById("slotsBody")!,
@@ -67,6 +85,8 @@ const els = {
   btnBatch: document.getElementById("btnBatch") as HTMLButtonElement,
   btnRefresh: document.getElementById("btnRefresh") as HTMLButtonElement,
   btnKill: document.getElementById("btnKill") as HTMLButtonElement,
+  btnPrepareUsers: document.getElementById("btnPrepareUsers") as HTMLButtonElement,
+  btnRefreshUsers: document.getElementById("btnRefreshUsers") as HTMLButtonElement,
 };
 
 let busy = false;
@@ -84,18 +104,36 @@ function log(msg: string) {
 
 function setBusy(v: boolean) {
   busy = v;
-  [els.btnOne, els.btnBatch, els.btnDetect, els.btnBrowse, els.btnKill].forEach(
-    (b) => (b.disabled = v),
-  );
+  [
+    els.btnOne,
+    els.btnBatch,
+    els.btnDetect,
+    els.btnBrowse,
+    els.btnKill,
+    els.btnPrepareUsers,
+    els.btnRefreshUsers,
+  ].forEach((b) => (b.disabled = v));
+}
+
+function syncSafePanel() {
+  const on =
+    platform === "windows" && els.windowsSafeMode.checked;
+  els.safeModePanel.style.display = on ? "" : "none";
 }
 
 function renderSlots() {
+  const prefix = els.safePrefix.value.trim() || "WeComSlot";
   els.slotsBody.innerHTML = "";
   for (const s of slots) {
+    s.username = `${prefix}${s.index}`;
+    const userBadge = s.userExists
+      ? `<span class="badge running">${escapeHtml(s.username)}</span>`
+      : `<span class="badge idle">${escapeHtml(s.username)} · 未创建</span>`;
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${s.index}</td>
       <td><input data-alias="${s.index}" value="${escapeHtml(s.alias)}" /></td>
+      <td>${userBadge}</td>
       <td><span class="badge ${s.status}">${s.status}</span></td>
       <td>${s.pid ?? "—"}</td>
       <td>${escapeHtml(s.message)}</td>
@@ -106,7 +144,7 @@ function renderSlots() {
     input.addEventListener("change", (e) => {
       const el = e.target as HTMLInputElement;
       const idx = Number(el.dataset.alias);
-      const slot = slots.find((s) => s.index === idx);
+      const slot = slots.find((x) => x.index === idx);
       if (slot) slot.alias = el.value;
     });
   });
@@ -128,7 +166,26 @@ function options(count: number): LaunchOptions {
     maxDelayMs: Number(els.maxDelay.value) || 6000,
     preferRegistry: els.preferRegistry.checked,
     macosCloneInstances: els.macosClone.checked,
+    windowsSafeMode: els.windowsSafeMode.checked,
+    safeModePassword: els.safePassword.value || null,
+    safeModeUserPrefix: els.safePrefix.value.trim() || "WeComSlot",
   };
+}
+
+async function refreshUsers() {
+  if (platform !== "windows") return;
+  const count = Math.min(MAX, Math.max(1, Number(els.batchCount.value) || 8));
+  const list = await invoke<SafeModeUserStatus[]>("list_safe_mode_users", {
+    count,
+    userPrefix: els.safePrefix.value.trim() || "WeComSlot",
+  });
+  list.forEach((u) => {
+    const slot = slots[u.index - 1];
+    if (!slot) return;
+    slot.username = u.username;
+    slot.userExists = u.exists;
+  });
+  renderSlots();
 }
 
 async function refreshInfo() {
@@ -141,9 +198,14 @@ async function refreshInfo() {
   if (!els.appPath.value && info.resolvedPath) {
     els.appPath.value = info.resolvedPath;
   }
-  els.winOpt.style.display = info.platform === "windows" ? "" : "none";
+  const isWin = info.platform === "windows";
+  els.winOpt.style.display = isWin ? "" : "none";
+  els.winSafeOpt.style.display = isWin ? "" : "none";
   els.macOpt.style.display = info.platform === "macos" ? "" : "none";
+  syncSafePanel();
   els.statusText.textContent = `运行中企业微信进程: ${info.runningCount}`;
+  if (isWin) await refreshUsers();
+  else renderSlots();
 }
 
 async function launchOne() {
@@ -232,6 +294,48 @@ els.btnBrowse.addEventListener("click", async () => {
   }
 });
 
+els.windowsSafeMode.addEventListener("change", () => {
+  syncSafePanel();
+  void refreshUsers();
+});
+els.safePrefix.addEventListener("change", () => void refreshUsers());
+els.batchCount.addEventListener("change", () => void refreshUsers());
+
+els.btnPrepareUsers.addEventListener("click", async () => {
+  const password = els.safePassword.value.trim();
+  if (password.length < 8) {
+    log("密码至少 8 位");
+    return;
+  }
+  setBusy(true);
+  try {
+    const result = await invoke<{
+      created: string[];
+      alreadyExisted: string[];
+      failed: string[];
+      message: string;
+    }>("prepare_safe_mode_users", {
+      req: {
+        count: Number(els.batchCount.value) || 8,
+        password,
+        userPrefix: els.safePrefix.value.trim() || "WeComSlot",
+      },
+    });
+    log(result.message);
+    if (result.failed?.length) {
+      result.failed.forEach((f) => log(`失败: ${f}`));
+    }
+    els.statusText.textContent = result.message;
+    await refreshUsers();
+  } catch (e) {
+    log(String(e));
+    els.statusText.textContent = String(e);
+  } finally {
+    setBusy(false);
+  }
+});
+
+els.btnRefreshUsers.addEventListener("click", () => void refreshUsers());
 els.btnOne.addEventListener("click", () => void launchOne());
 els.btnBatch.addEventListener("click", () => void launchBatch());
 els.btnRefresh.addEventListener("click", () => void refreshInfo());
