@@ -15,7 +15,7 @@ pub use macos::*;
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub use common::unsupported::*;
 
-pub use common::{current_platform, kill_all_wecom, list_wecom_pids};
+pub use common::{allocate_free_slots, current_platform, kill_all_wecom, list_wecom_pids};
 
 #[cfg(not(target_os = "windows"))]
 pub fn ensure_safe_mode_users(

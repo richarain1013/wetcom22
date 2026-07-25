@@ -65,25 +65,29 @@ async fn launch_batch_inner(options: LaunchOptions) -> Result<BatchResult, Strin
     let app = platform::resolve_app_path(options.app_path.as_deref())
         .ok_or_else(|| "未找到企业微信，请手动指定路径".to_string())?;
 
-    let mut policy = LaunchPolicy::new(options.min_delay_ms, options.max_delay_ms);
-    let mut results = Vec::with_capacity(count as usize);
+    // Always take free slots — never reuse a running Mac Bundle ID / Win Safe Mode user.
+    let slots = platform::allocate_free_slots(count)?;
 
-    for i in 1..=count {
+    let mut policy = LaunchPolicy::new(options.min_delay_ms, options.max_delay_ms);
+    let mut results = Vec::with_capacity(slots.len());
+
+    for (ordinal, &index) in slots.iter().enumerate() {
+        // tier_for_index is 1-based position in this batch request
+        let tier_pos = (ordinal as u8).saturating_add(1);
         if options.use_tier_delays {
-            policy.wait_for_tier(options.tier_for_index(i)).await;
+            policy.wait_for_tier(options.tier_for_index(tier_pos)).await;
         } else {
             policy.wait_before_next().await;
         }
 
         match platform::prepare_next_instance(&options) {
             Ok(msg) => {
-                let tier = options.tier_for_index(i);
-                let mut one = platform::spawn_instance(&app, i, &options)?;
-                one.message = format!(
-                    "{msg} | [{}] {}",
-                    tier.label(),
-                    one.message
-                );
+                let tier = options.tier_for_index(tier_pos);
+                let mut one = platform::spawn_instance(&app, index, &options)?;
+                if one.success {
+                    platform::note_slot_pid(index, one.pid);
+                }
+                one.message = format!("{msg} | [{}] {}", tier.label(), one.message);
                 let ok = one.success;
                 results.push(one);
                 if !ok {
@@ -95,7 +99,7 @@ async fn launch_batch_inner(options: LaunchOptions) -> Result<BatchResult, Strin
                     success: false,
                     pid: None,
                     message: e,
-                    index: i,
+                    index,
                 });
                 break;
             }

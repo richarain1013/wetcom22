@@ -51,12 +51,43 @@ pub fn prepare_next_instance(_opts: &LaunchOptions) -> Result<String, String> {
     }
 }
 
+pub fn busy_slot_indices() -> Vec<u8> {
+    let mut busy = Vec::new();
+    for i in 1..=crate::models::MAX_SLOTS {
+        if !pids_for_instance(&instance_app_path(i)).is_empty() {
+            busy.push(i);
+        }
+    }
+    busy
+}
+
+pub fn note_slot_pid(_index: u8, _pid: Option<u32>) {
+    // macOS detects occupancy from running instance paths.
+}
+
+pub fn clear_slot_pid_state() {
+    // no-op
+}
+
 pub fn spawn_instance(
     app_path: &Path,
     index: u8,
     _opts: &LaunchOptions,
 ) -> Result<LaunchResult, String> {
     let instance_app = ensure_hidden_clone(app_path, index)?;
+
+    let before = pids_for_instance(&instance_app);
+    if !before.is_empty() {
+        return Ok(LaunchResult {
+            success: false,
+            pid: before.first().copied(),
+            message: format!(
+                "槽位 #{index} 已在运行 PID={}（同一 Bundle 不能再开）。请再点「新开 1 个」分配下一空闲槽位。",
+                before[0]
+            ),
+            index,
+        });
+    }
 
     let status = Command::new("open")
         .arg("-n")
@@ -73,8 +104,7 @@ pub fn spawn_instance(
         });
     }
 
-    // CEF needs a moment; confirm process stayed up past the old ~20s crash window
-    // would be too slow for UX — check early, then a second check.
+    // CEF needs a moment; confirm a NEW process for this slot stayed up.
     thread::sleep(Duration::from_millis(2500));
     let mut pids = pids_for_instance(&instance_app);
     if pids.is_empty() {
@@ -83,13 +113,11 @@ pub fn spawn_instance(
     }
 
     if pids.is_empty() {
-        let _ = fs::remove_dir_all(&instance_app);
-        let _ = fs::remove_file(clone_marker_path(index));
         return Ok(LaunchResult {
             success: false,
             pid: None,
             message: format!(
-                "实例 #{index} 启动后退出。已删除坏副本，请再点「新开 1 个」重建。"
+                "实例 #{index} 启动后退出。可再试一次；若持续失败请删除 Instances 后重建。"
             ),
             index,
         });

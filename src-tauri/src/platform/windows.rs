@@ -2,6 +2,7 @@
 //! Zero injection into WXWork.exe.
 
 use crate::models::{LaunchOptions, LaunchResult};
+use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -113,6 +114,68 @@ pub fn prepare_next_instance(opts: &LaunchOptions) -> Result<String, String> {
 
     std::thread::sleep(std::time::Duration::from_millis(400));
     Ok(messages.join(" | "))
+}
+
+fn slot_state_path() -> PathBuf {
+    let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
+    base.join("WeComLauncher").join("slot-pids.json")
+}
+
+/// Slots whose last launched PID is still a live WeCom process.
+pub fn busy_slot_indices() -> Vec<u8> {
+    let live: std::collections::HashSet<u32> = crate::platform::list_wecom_pids().into_iter().collect();
+    let mut map = load_slot_pids();
+    let mut busy = Vec::new();
+    let mut changed = false;
+    for i in 1..=crate::models::MAX_SLOTS {
+        if let Some(pid) = map.get(&i).copied() {
+            if live.contains(&pid) {
+                busy.push(i);
+            } else {
+                map.remove(&i);
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        let _ = save_slot_pids(&map);
+    }
+    busy
+}
+
+pub fn note_slot_pid(index: u8, pid: Option<u32>) {
+    let mut map = load_slot_pids();
+    match pid {
+        Some(p) => {
+            map.insert(index, p);
+        }
+        None => {
+            map.remove(&index);
+        }
+    }
+    let _ = save_slot_pids(&map);
+}
+
+pub fn clear_slot_pid_state() {
+    let path = slot_state_path();
+    let _ = fs::remove_file(path);
+}
+
+fn load_slot_pids() -> std::collections::HashMap<u8, u32> {
+    let path = slot_state_path();
+    let Ok(bytes) = fs::read(&path) else {
+        return std::collections::HashMap::new();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+fn save_slot_pids(map: &std::collections::HashMap<u8, u32>) -> Result<(), String> {
+    let path = slot_state_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let bytes = serde_json::to_vec_pretty(map).map_err(|e| e.to_string())?;
+    fs::write(path, bytes).map_err(|e| e.to_string())
 }
 
 pub fn spawn_instance(

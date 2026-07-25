@@ -329,12 +329,19 @@ async function launchOne() {
     const result = await invoke<LaunchResult>("launch_one", {
       options: options(1),
     });
-    const slot = slots.find((s) => s.status !== "running") ?? slots[0];
+    // Backend allocates the next free slot (must not always use #1).
+    const slot = slots[result.index - 1] ?? slots.find((s) => s.status !== "running") ?? slots[0];
     slot.status = result.success ? "running" : "error";
     slot.pid = result.pid;
     slot.message = result.message;
     log(result.message);
-    els.statusText.textContent = result.message;
+    els.statusText.textContent = result.success
+      ? `槽位 #${result.index} 已启动`
+      : result.message;
+    // Ensure batchCount UI shows enough rows for the allocated slot.
+    if (result.index > Number(els.batchCount.value || 0)) {
+      els.batchCount.value = String(Math.min(MAX, result.index));
+    }
     renderSlots();
     await refreshInfo();
   } catch (e) {
@@ -356,17 +363,14 @@ async function launchBatch() {
     }
   }
   setBusy(true);
-  els.statusText.textContent = `分批启动 ${count} 个实例…`;
-  for (let i = 0; i < count; i++) {
-    slots[i].status = "idle";
-    slots[i].pid = null;
-    slots[i].message = "";
-  }
+  els.statusText.textContent = `分批启动 ${count} 个空闲槽位…`;
+  // Do not wipe already-running slots — batch allocates free indices only.
   renderSlots();
   try {
     const batch = await invoke<BatchResult>("launch_batch", {
       options: options(count),
     });
+    let maxIdx = Number(els.batchCount.value) || count;
     batch.results.forEach((r) => {
       const slot = slots[r.index - 1];
       if (!slot) return;
@@ -374,7 +378,9 @@ async function launchBatch() {
       slot.pid = r.pid;
       slot.message = r.message;
       log(r.message);
+      if (r.index > maxIdx) maxIdx = r.index;
     });
+    els.batchCount.value = String(Math.min(MAX, Math.max(count, maxIdx)));
     const ok = batch.results.filter((r) => r.success).length;
     els.statusText.textContent = `批量完成：成功 ${ok} / 尝试 ${batch.results.length}（${batch.platform}）`;
     renderSlots();
