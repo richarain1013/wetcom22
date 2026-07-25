@@ -17,9 +17,9 @@
 
 ## macOS
 
-- **仅**使用官方 `/Applications/企业微信.app`：`open -n` 或直接跑二进制  
-- **不再克隆** `.app` 到 `~/Applications`（避免启动台一堆镜像）  
-- 启动时自动清理旧版残留镜像  
+- 在 `~/Library/Application Support/WeComLauncher/Instances/` 创建隔离副本（改 Bundle ID + 重签）  
+- **不写入** `~/Applications`，避免启动台镜像  
+- 直接启动 Mach-O，并用 `lsregister -u` 取消索引  
 - 安装说明见 [MACOS.md](./MACOS.md)  
 
 ## 预期

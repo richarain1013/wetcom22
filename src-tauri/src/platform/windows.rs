@@ -74,18 +74,34 @@ fn try_enable_multi_instances(max: u32) -> bool {
 }
 
 pub fn prepare_next_instance(opts: &LaunchOptions) -> Result<String, String> {
-    if opts.windows_safe_mode {
-        let release = release_wecom_mutexes()?;
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        return Ok(format!("安全模式准备 | {release}"));
-    }
     if opts.prefer_registry {
         let _ = try_enable_multi_instances(crate::models::MAX_SLOTS as u32);
     }
-    let release = release_wecom_mutexes()?;
-    // Give the first instance a moment after mutex close before the next CreateProcess.
-    std::thread::sleep(std::time::Duration::from_millis(300));
-    Ok(release)
+
+    // Always try to enable SeDebugPrivilege so we can open WXWork handles.
+    let _ = enable_debug_privilege();
+
+    let mut messages = Vec::new();
+    // Retry: WeCom may recreate mutexes briefly after launch.
+    for attempt in 1..=3 {
+        match release_wecom_mutexes() {
+            Ok(msg) => {
+                messages.push(format!("#{attempt}:{msg}"));
+                if msg.contains("已释放") || msg.contains("未发现") {
+                    break;
+                }
+            }
+            Err(e) => messages.push(format!("#{attempt}:失败 {e}")),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    if opts.windows_safe_mode {
+        return Ok(format!("安全模式准备 | {}", messages.join(" | ")));
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(350));
+    Ok(messages.join(" | "))
 }
 
 pub fn spawn_instance(
@@ -102,21 +118,26 @@ pub fn spawn_instance(
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
 
-    // Prefer shell `start` so the process tree matches a normal user double-click,
-    // then fall back to direct CreateProcess.
-    let started = spawn_via_shell_start(app_path, &workdir)
-        .or_else(|_| spawn_direct(app_path, &workdir));
+    // Direct CreateProcess first (we need a real PID to release its mutex later).
+    // Shell `start` is fallback only.
+    let started = spawn_direct(app_path, &workdir).or_else(|_| spawn_via_shell_start(app_path, &workdir));
 
     match started {
-        Ok(pid) => Ok(LaunchResult {
-            success: true,
-            pid,
-            message: format!(
-                "已启动实例 #{index}{}",
-                pid.map(|p| format!(" PID={p}")).unwrap_or_default()
-            ),
-            index,
-        }),
+        Ok(pid) => {
+            // After process starts, wait and close its exclusive mutex so the next instance can boot.
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            let _ = enable_debug_privilege();
+            let post = release_wecom_mutexes().unwrap_or_default();
+            Ok(LaunchResult {
+                success: true,
+                pid,
+                message: format!(
+                    "已启动实例 #{index}{} | 启动后释放: {post}",
+                    pid.map(|p| format!(" PID={p}")).unwrap_or_default()
+                ),
+                index,
+            })
+        }
         Err(e) => Ok(LaunchResult {
             success: false,
             pid: None,
@@ -155,6 +176,51 @@ fn spawn_direct(app_path: &Path, workdir: &Path) -> Result<Option<u32>, String> 
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(Some(child.id()))
+}
+
+fn enable_debug_privilege() -> bool {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, LUID};
+    use windows::Win32::Security::{
+        AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
+        TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows::core::PCWSTR;
+
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+            &mut token,
+        )
+        .is_err()
+        {
+            return false;
+        }
+
+        let mut luid = LUID::default();
+        let name: Vec<u16> = "SeDebugPrivilege"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        if LookupPrivilegeValueW(PCWSTR::null(), PCWSTR(name.as_ptr()), &mut luid).is_err() {
+            let _ = CloseHandle(token);
+            return false;
+        }
+
+        let mut tp = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: SE_PRIVILEGE_ENABLED,
+            }],
+        };
+
+        let ok = AdjustTokenPrivileges(token, false, Some(&mut tp), 0, None, None).is_ok();
+        let _ = CloseHandle(token);
+        ok
+    }
 }
 
 /// Create local users WeComSlot1..N if missing. Requires administrator.

@@ -56,7 +56,7 @@ pub struct LaunchOptions {
     pub max_delay_ms: u64,
     #[serde(default = "default_true")]
     pub prefer_registry: bool,
-    /// Deprecated: macOS no longer clones .app (Launchpad clutter). Kept for API compat; ignored.
+    /// Deprecated API flag (ignored). macOS always uses hidden Application Support clones.
     #[serde(default)]
     pub macos_clone_instances: bool,
     #[serde(default)]

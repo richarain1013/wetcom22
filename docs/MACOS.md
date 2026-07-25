@@ -12,17 +12,22 @@ Release 包为 **未公证** 的本地构建，macOS 会拦截。按下面做：
    xattr -cr "/Applications/WeCom Launcher.app"
    open "/Applications/WeCom Launcher.app"
    ```
-3. 不要用「克隆企业微信.app」的旧方式；本版本只用官方客户端多开
+3. 多开副本在隐藏目录，**不会**在启动台出现「企业微信-1」等镜像
 
 ## 多开原理（当前版本）
 
-- 直接启动 `/Applications/企业微信.app` 内可执行文件，或 `open -n`  
-- **不会**在启动台创建「企业微信-1…10」镜像  
-- 若以前装过旧版，启动器会自动清理 `~/Applications/WeComMulti/`
+企微在 macOS 上会拦截「同一 Bundle 多开」，因此需要：
+
+1. 在**隐藏目录**复制官方 `.app`：`~/Library/Application Support/WeComLauncher/Instances/`  
+2. 修改独立 `CFBundleIdentifier` 并重新签名  
+3. **直接启动可执行文件**（不放进 `~/Applications` / 启动台）
+
+旧版曾写入 `~/Applications/WeComMulti/`，启动器会自动清理。
 
 ## 使用
 
 1. 确认已安装官方「企业微信」  
 2. 打开 WeCom Launcher → 路径应自动识别  
-3. 点「分批启动」或「新开 1 个」  
-4. 每个窗口分别扫码登录  
+3. 点「新开 1 个」两次，应出现两个独立登录窗口  
+4. 首次多开会复制应用，稍等片刻  
+5. 每个窗口分别扫码登录  

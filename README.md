@@ -15,11 +15,11 @@
 
 | | Windows | macOS |
 |--|---------|-------|
-| 多开手段 | 注册表 `multi_instances` + 进程外释放 Mutex | 克隆 `.app`（改 Bundle ID）或 `open -n` |
+| 多开手段 | 注册表 `multi_instances` + 进程外释放 Mutex（建议管理员） | 隐藏目录克隆 `.app`（独立 Bundle ID，不进启动台） |
 | 默认路径 | `WXWork.exe` | `/Applications/企业微信.app` |
-| 8–10 开建议 | 分批 + 2.5–6s 抖动 | 开启「克隆 .app」 |
+| 8–10 开建议 | 管理员 + 分批 + 2.5–6s 抖动；主号可用安全模式/虚拟机 | 首次会复制实例，稍等；逐个扫码登录 |
 
-两端均：**零注入、不改官方二进制内容（macOS 仅复制一份 .app 改 Bundle ID）**。
+两端均：**零注入、不改官方安装目录内的二进制**（macOS 仅在 Application Support 下复制改 Bundle ID）。
 
 ## 开发环境
 

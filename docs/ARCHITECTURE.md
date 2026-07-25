@@ -13,9 +13,10 @@
         ▼                   ▼
 ┌───────────────┐   ┌───────────────┐
 │ windows.rs    │   │ macos.rs      │
-│ Mutex 释放    │   │ 克隆 .app /   │
-│ 注册表探测    │   │ open -n       │
-│ CreateProcess │   │ 独立 HOME     │
+│ Mutex 释放    │   │ 隐藏目录克隆 │
+│ 注册表探测    │   │ 改 Bundle ID │
+│ CreateProcess │   │ 直接启 Mach-O│
+│ Safe Mode     │   │ 清理旧启动台 │
 └───────────────┘   └───────────────┘
 ```
 
