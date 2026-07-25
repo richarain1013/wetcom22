@@ -18,8 +18,10 @@
 ## macOS
 
 - 在 `~/Library/Application Support/WeComLauncher/Instances/` 创建隔离副本  
-- Bundle ID：`com.tencent.WeWorkMac.instanceN`，**保留 App Sandbox** 后 ad-hoc 重签  
-- 用 **`open -n`** 启动（直接 exec CEF 主程序会 GPU 崩溃退出）  
+- Bundle ID：`com.tencent.WeWorkMac.instanceN`  
+- **浅签名**（绝不 `--deep`），保留 CEF Helper 的腾讯 Developer ID  
+- 外壳带原 entitlements + `disable-library-validation`，App Sandbox 开启  
+- 用 **`open -n`** 启动  
 - **不写入** `~/Applications`，避免启动台镜像  
 - 安装说明见 [MACOS.md](./MACOS.md)  
 

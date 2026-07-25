@@ -1,10 +1,13 @@
 //! macOS backend: multi-open via isolated .app copies with unique Bundle IDs.
 //! Clones live under Application Support (NOT ~/Applications) so Launchpad stays clean.
 //!
-//! Critical for WeCom CEF builds:
-//! - Launch with `open -n` (direct Mach-O spawn kills GPU helpers).
-//! - Re-sign with sandbox entitlements kept ON so each Bundle ID gets its own container.
-//! - Never strip sandbox / never share Documents/cefcache across instances.
+//! Critical for WeCom CEF builds (5.x):
+//! - Launch with `open -n` (direct Mach-O spawn is unstable).
+//! - Re-sign ONLY the outer .app + main executable — NEVER `--deep`.
+//!   Deep ad-hoc resign strips Tencent Developer ID from CEF Helpers and they
+//!   die with SIGTRAP ~15–25s after the QR login UI appears.
+//! - Keep App Sandbox entitlements (+ disable-library-validation) so each
+//!   Bundle ID gets its own container and can still load original Helpers.
 
 use crate::models::{LaunchOptions, LaunchResult};
 use std::fs;
@@ -13,8 +16,8 @@ use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
-/// Marker written next to a healthy clone so we can invalidate old broken copies.
-const CLONE_FORMAT: &str = "2"; // bump when clone recipe changes
+/// Bump when clone recipe changes (forces rebuild of old broken copies).
+const CLONE_FORMAT: &str = "3";
 
 pub fn resolve_app_path(override_path: Option<&str>) -> Option<PathBuf> {
     if let Some(p) = override_path {
@@ -41,10 +44,10 @@ pub fn prepare_next_instance(_opts: &LaunchOptions) -> Result<String, String> {
     let cleaned = cleanup_legacy_launchpad_clones();
     if cleaned > 0 {
         Ok(format!(
-            "macOS：已清理 {cleaned} 个启动台旧镜像；使用沙盒隔离实例多开"
+            "macOS：已清理 {cleaned} 个启动台旧镜像；使用浅签名沙盒实例多开"
         ))
     } else {
-        Ok("macOS：沙盒隔离实例多开（open -n，不进启动台）".into())
+        Ok("macOS：浅签名沙盒实例多开（保留 CEF Helper 原签名）".into())
     }
 }
 
@@ -55,8 +58,6 @@ pub fn spawn_instance(
 ) -> Result<LaunchResult, String> {
     let instance_app = ensure_hidden_clone(app_path, index)?;
 
-    // Prefer Launch Services. Direct exec of WeCom's CEF binary dies with
-    // "GPU process isn't usable" under ad-hoc copies.
     let status = Command::new("open")
         .arg("-n")
         .arg(&instance_app)
@@ -67,39 +68,28 @@ pub fn spawn_instance(
         return Ok(LaunchResult {
             success: false,
             pid: None,
-            message: format!(
-                "open -n 失败，退出码 {:?}（可尝试：xattr -cr 实例目录后重试）",
-                status.code()
-            ),
+            message: format!("open -n 失败，退出码 {:?}", status.code()),
             index,
         });
     }
 
-    // Give CEF helpers time to spawn; confirm the instance actually stayed up.
-    thread::sleep(Duration::from_millis(1800));
-    let pids = pids_for_instance(&instance_app);
+    // CEF needs a moment; confirm process stayed up past the old ~20s crash window
+    // would be too slow for UX — check early, then a second check.
+    thread::sleep(Duration::from_millis(2500));
+    let mut pids = pids_for_instance(&instance_app);
     if pids.is_empty() {
-        // One retry — first launch after clone/codesign is sometimes slow.
-        thread::sleep(Duration::from_millis(2200));
-        let pids2 = pids_for_instance(&instance_app);
-        if pids2.is_empty() {
-            let _ = fs::remove_dir_all(&instance_app);
-            let _ = fs::remove_file(clone_marker_path(index));
-            return Ok(LaunchResult {
-                success: false,
-                pid: None,
-                message: format!(
-                    "实例 #{index} 启动后立即退出。已删除坏副本，请再点一次「新开 1 个」。"
-                ),
-                index,
-            });
-        }
+        thread::sleep(Duration::from_millis(2500));
+        pids = pids_for_instance(&instance_app);
+    }
+
+    if pids.is_empty() {
+        let _ = fs::remove_dir_all(&instance_app);
+        let _ = fs::remove_file(clone_marker_path(index));
         return Ok(LaunchResult {
-            success: true,
-            pid: pids2.first().copied(),
+            success: false,
+            pid: None,
             message: format!(
-                "已启动隔离实例 #{index} PID={}（沙盒容器，open -n）",
-                pids2[0]
+                "实例 #{index} 启动后退出。已删除坏副本，请再点「新开 1 个」重建。"
             ),
             index,
         });
@@ -109,7 +99,7 @@ pub fn spawn_instance(
         success: true,
         pid: pids.first().copied(),
         message: format!(
-            "已启动隔离实例 #{index} PID={}（沙盒容器，open -n）",
+            "已启动隔离实例 #{index} PID={}（浅签名+沙盒，open -n）",
             pids[0]
         ),
         index,
@@ -144,7 +134,8 @@ fn ensure_hidden_clone(source_app: &Path, index: u8) -> Result<PathBuf, String> 
     let need_rebuild = !dest.exists()
         || !bundle_looks_valid(&dest)
         || !clone_format_ok(index)
-        || !bundle_id_matches(&dest, index);
+        || !bundle_id_matches(&dest, index)
+        || !helpers_keep_team_signature(&dest);
 
     if need_rebuild {
         if dest.exists() {
@@ -172,11 +163,37 @@ fn bundle_id_matches(app: &Path, index: u8) -> bool {
         .output();
     match output {
         Ok(o) if o.status.success() => {
-            let id = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            id == expected_bundle_id(index)
+            String::from_utf8_lossy(&o.stdout).trim() == expected_bundle_id(index)
         }
         _ => false,
     }
+}
+
+/// Deep ad-hoc resign replaces Helper TeamIdentifier with "not set" — detect & rebuild.
+fn helpers_keep_team_signature(app: &Path) -> bool {
+    let frameworks = app.join("Contents/Frameworks");
+    let Ok(entries) = fs::read_dir(&frameworks) else {
+        return true;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.contains("Helper") && name.ends_with(".app") {
+            let output = Command::new("codesign")
+                .args(["-dv", &entry.path().to_string_lossy()])
+                .output();
+            if let Ok(o) = output {
+                let err = String::from_utf8_lossy(&o.stderr); // codesign -dv writes to stderr
+                if err.contains("TeamIdentifier=not set") || err.contains("Signature=adhoc") {
+                    return false;
+                }
+                if err.contains("TeamIdentifier=88L2Q4487U") || err.contains("Authority=Developer ID")
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    true
 }
 
 fn bundle_looks_valid(app: &Path) -> bool {
@@ -184,7 +201,6 @@ fn bundle_looks_valid(app: &Path) -> bool {
 }
 
 fn create_app_clone(source_app: &Path, dest: &Path, index: u8) -> Result<(), String> {
-    // Prefer APFS clonefile (instant, CoW).
     let copied = Command::new("cp")
         .args(["-cR"])
         .arg(source_app)
@@ -207,12 +223,11 @@ fn create_app_clone(source_app: &Path, dest: &Path, index: u8) -> Result<(), Str
     let plist = dest.join("Contents/Info.plist");
     let bundle_id = expected_bundle_id(index);
     let display = format!("WeComInst{index}");
-
     plist_set(&plist, "CFBundleIdentifier", &bundle_id)?;
     let _ = plist_set(&plist, "CFBundleName", &display);
     let _ = plist_set(&plist, "CFBundleDisplayName", &display);
 
-    // Invalidate old seal before ad-hoc resign.
+    // Only remove the OUTER seal. Nested Helper/_CodeSignature must stay (Tencent ID).
     let _ = fs::remove_dir_all(dest.join("Contents/_CodeSignature"));
 
     let _ = Command::new("/usr/bin/xattr")
@@ -220,26 +235,29 @@ fn create_app_clone(source_app: &Path, dest: &Path, index: u8) -> Result<(), Str
         .arg(dest)
         .status();
 
-    let ents_path = write_clone_entitlements()?;
-    let output = Command::new("codesign")
-        .args([
-            "--force",
-            "--deep",
-            "--sign",
-            "-",
-            "--entitlements",
-        ])
-        .arg(&ents_path)
-        .arg("--timestamp=none")
-        .arg(dest)
-        .output()
-        .map_err(|e| format!("codesign 失败: {e}"))?;
+    let ents_path = write_clone_entitlements(source_app)?;
+
+    // Shallow sign: outer bundle + main executable only. NEVER --deep.
+    let main_exe = find_macos_executable(dest)?;
+    for target in [dest, main_exe.as_path()] {
+        let output = Command::new("codesign")
+            .args(["--force", "--sign", "-", "--entitlements"])
+            .arg(&ents_path)
+            .arg("--timestamp=none")
+            .arg(target)
+            .output()
+            .map_err(|e| format!("codesign 失败: {e}"))?;
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr);
+            let _ = fs::remove_file(&ents_path);
+            return Err(format!("codesign {} 失败: {err}", target.display()));
+        }
+    }
 
     let _ = fs::remove_file(&ents_path);
 
-    if !output.status.success() {
-        let err = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("codesign 失败: {err}"));
+    if !helpers_keep_team_signature(dest) {
+        return Err("克隆后 CEF Helper 签名异常（疑似被 deep 重签），请重试".into());
     }
 
     Ok(())
@@ -268,11 +286,20 @@ fn plist_set(plist: &Path, key: &str, value: &str) -> Result<(), String> {
     }
 }
 
-/// Sandbox ON + CEF-friendly CS flags. No team app-groups / fixed mach ports
-/// (those collide across instances under ad-hoc signing).
-fn write_clone_entitlements() -> Result<PathBuf, String> {
+/// Copy original entitlements and ensure disable-library-validation is set
+/// so ad-hoc outer binary can load Developer ID Helpers.
+fn write_clone_entitlements(source_app: &Path) -> Result<PathBuf, String> {
     let path = instances_root().join(".clone-entitlements.plist");
-    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+    let output = Command::new("codesign")
+        .args(["-d", "--entitlements", ":-"])
+        .arg(source_app)
+        .output()
+        .map_err(|e| format!("导出 entitlements 失败: {e}"))?;
+    if !output.status.success() || output.stdout.is_empty() {
+        // Fallback minimal sandbox entitlements
+        fs::write(
+            &path,
+            r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -288,8 +315,6 @@ fn write_clone_entitlements() -> Result<PathBuf, String> {
 	<true/>
 	<key>com.apple.security.network.server</key>
 	<true/>
-	<key>com.apple.security.device.audio-input</key>
-	<true/>
 	<key>com.apple.security.device.camera</key>
 	<true/>
 	<key>com.apple.security.device.microphone</key>
@@ -298,20 +323,37 @@ fn write_clone_entitlements() -> Result<PathBuf, String> {
 	<true/>
 	<key>com.apple.security.files.downloads.read-write</key>
 	<true/>
-	<key>com.apple.security.files.bookmarks.app-scope</key>
-	<true/>
-	<key>com.apple.security.assets.pictures.read-write</key>
-	<true/>
-	<key>com.apple.security.print</key>
-	<true/>
 </dict>
 </plist>
-"#;
-    fs::write(&path, xml).map_err(|e| format!("写入 entitlements 失败: {e}"))?;
+"#,
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(path);
+    }
+
+    fs::write(&path, &output.stdout).map_err(|e| e.to_string())?;
+
+    // Ensure disable-library-validation (required for mixed Team ID loading).
+    let set = Command::new("/usr/libexec/PlistBuddy")
+        .args([
+            "-c",
+            "Set :com.apple.security.cs.disable-library-validation bool true",
+            &path.to_string_lossy(),
+        ])
+        .status();
+    if set.map(|s| !s.success()).unwrap_or(true) {
+        let _ = Command::new("/usr/libexec/PlistBuddy")
+            .args([
+                "-c",
+                "Add :com.apple.security.cs.disable-library-validation bool true",
+                &path.to_string_lossy(),
+            ])
+            .status();
+    }
+
     Ok(path)
 }
 
-/// Remove old clones that polluted Launchpad (~/Applications/WeComMulti).
 pub fn cleanup_legacy_clones() -> usize {
     cleanup_legacy_launchpad_clones()
 }
@@ -336,6 +378,17 @@ fn cleanup_legacy_launchpad_clones() -> usize {
         }
     }
     let _ = fs::remove_dir(&root);
+
+    // Also wipe TestMatrix leftovers from diagnostics.
+    let test = home
+        .join("Library")
+        .join("Application Support")
+        .join("WeComLauncher")
+        .join("TestMatrix");
+    if test.exists() {
+        let _ = fs::remove_dir_all(&test);
+    }
+
     n
 }
 
@@ -382,7 +435,10 @@ fn find_macos_executable(app: &Path) -> Result<PathBuf, String> {
 }
 
 fn pids_for_instance(instance_app: &Path) -> Vec<u32> {
-    let needle = instance_app.join("Contents/MacOS").to_string_lossy().to_string();
+    let needle = instance_app
+        .join("Contents/MacOS")
+        .to_string_lossy()
+        .to_string();
     let output = Command::new("pgrep").args(["-f", &needle]).output();
     match output {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)

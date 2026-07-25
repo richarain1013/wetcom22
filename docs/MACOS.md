@@ -16,19 +16,20 @@ Release 包为 **未公证** 的本地构建，macOS 会拦截。按下面做：
 
 ## 多开原理（当前版本）
 
-企微在 macOS 上会拦截「同一 Bundle 多开」，且 CEF 内核不能用「直接跑 Mach-O」的方式启动（会 GPU 崩溃后退出）。因此需要：
+企微 Mac 版基于 CEF。对整包做 `codesign --deep` 会把 Helper 的腾讯 Developer ID 换成 ad-hoc，扫码页出现后约 15–25 秒 Helper 会 SIGTRAP，主进程随之退出。正确做法：
 
 1. 在**隐藏目录**复制官方 `.app`：`~/Library/Application Support/WeComLauncher/Instances/`  
 2. 修改独立 `CFBundleIdentifier`（如 `com.tencent.WeWorkMac.instanceN`）  
-3. **保留 App Sandbox entitlement** 后 ad-hoc 重签 → 每个实例独立容器  
-4. 用 **`open -n`** 启动（不要直接 exec 主程序）
+3. **只浅签名**外壳 + 主程序（保留 Helper 原签名），并加上 `disable-library-validation`  
+4. 保留 App Sandbox → 每实例独立容器  
+5. 用 **`open -n`** 启动  
 
-旧版曾写入 `~/Applications/WeComMulti/`，或用无沙盒/直启方式导致「闪一下就关」，启动器会自动重建坏副本。
+旧坏副本（deep 重签）会按格式标记自动重建。
 
 ## 使用
 
 1. 确认已安装官方「企业微信」  
-2. 打开 WeCom Launcher → 路径应自动识别  
-3. 点「新开 1 个」两次，应出现两个独立登录窗口（首次会复制+重签，约 10–30 秒）  
-4. 每个窗口分别扫码登录  
-5. 若仍闪退：完全退出企微后，删掉 `~/Library/Application Support/WeComLauncher/Instances/` 再试一次
+2. 打开 WeCom Launcher（0.1.4+）→ 路径应自动识别  
+3. 点「新开 1 个」——首次复制+浅签名约 10–30 秒；扫码窗应能一直保持  
+4. 再点一次可开第二个独立登录窗  
+5. 若仍闪退：完全退出企微，删除 `~/Library/Application Support/WeComLauncher/Instances/` 后再试

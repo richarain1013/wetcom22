@@ -19,8 +19,11 @@ const MUTEX_HINTS: &[&str] = &[
     "Tencent.WeWork.ExclusiveObject",
     "Tencent.WeWork.ExclusiveObjectInstance",
     "Tencent.WeWork.Exclusive",
+    "Tencent.WeWork.Instance",
     "WeWorkExclusive",
     "WXWorkExclusive",
+    "WXWork_Exclusive",
+    "WeWork_ExclusiveObject",
 ];
 
 pub fn resolve_app_path(override_path: Option<&str>) -> Option<PathBuf> {
@@ -79,11 +82,19 @@ pub fn prepare_next_instance(opts: &LaunchOptions) -> Result<String, String> {
     }
 
     // Always try to enable SeDebugPrivilege so we can open WXWork handles.
-    let _ = enable_debug_privilege();
+    let dbg = enable_debug_privilege();
+    let elevated = is_elevated();
 
     let mut messages = Vec::new();
+    if !elevated {
+        messages.push("建议以管理员运行（否则可能无法释放互斥体）".into());
+    }
+    if !dbg {
+        messages.push("SeDebugPrivilege 未启用".into());
+    }
+
     // Retry: WeCom may recreate mutexes briefly after launch.
-    for attempt in 1..=3 {
+    for attempt in 1..=5 {
         match release_wecom_mutexes() {
             Ok(msg) => {
                 messages.push(format!("#{attempt}:{msg}"));
@@ -93,14 +104,14 @@ pub fn prepare_next_instance(opts: &LaunchOptions) -> Result<String, String> {
             }
             Err(e) => messages.push(format!("#{attempt}:失败 {e}")),
         }
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::thread::sleep(std::time::Duration::from_millis(250));
     }
 
     if opts.windows_safe_mode {
         return Ok(format!("安全模式准备 | {}", messages.join(" | ")));
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(350));
+    std::thread::sleep(std::time::Duration::from_millis(400));
     Ok(messages.join(" | "))
 }
 
@@ -124,16 +135,41 @@ pub fn spawn_instance(
 
     match started {
         Ok(pid) => {
-            // After process starts, wait and close its exclusive mutex so the next instance can boot.
-            std::thread::sleep(std::time::Duration::from_millis(600));
-            let _ = enable_debug_privilege();
-            let post = release_wecom_mutexes().unwrap_or_default();
+            // After process starts, wait and close exclusive mutexes repeatedly so the
+            // next instance (and this one's helpers) are not blocked by re-created locks.
+            let mut posts = Vec::new();
+            for round in 1..=3 {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let _ = enable_debug_privilege();
+                posts.push(format!(
+                    "r{round}:{}",
+                    release_wecom_mutexes().unwrap_or_default()
+                ));
+            }
+
+            // Confirm the process is still alive shortly after launch.
+            if let Some(p) = pid {
+                std::thread::sleep(std::time::Duration::from_millis(800));
+                if !process_still_running(p) {
+                    return Ok(LaunchResult {
+                        success: false,
+                        pid: Some(p),
+                        message: format!(
+                            "实例 #{index} PID={p} 启动后退出。请以管理员运行，并先完全退出企微后再试。| {}",
+                            posts.join(" | ")
+                        ),
+                        index,
+                    });
+                }
+            }
+
             Ok(LaunchResult {
                 success: true,
                 pid,
                 message: format!(
-                    "已启动实例 #{index}{} | 启动后释放: {post}",
-                    pid.map(|p| format!(" PID={p}")).unwrap_or_default()
+                    "已启动实例 #{index}{} | {}",
+                    pid.map(|p| format!(" PID={p}")).unwrap_or_default(),
+                    posts.join(" | ")
                 ),
                 index,
             })
@@ -145,6 +181,13 @@ pub fn spawn_instance(
             index,
         }),
     }
+}
+
+fn process_still_running(pid: u32) -> bool {
+    use sysinfo::{Pid, ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    sys.process(Pid::from_u32(pid)).is_some()
 }
 
 fn spawn_via_shell_start(app_path: &Path, workdir: &Path) -> Result<Option<u32>, String> {
