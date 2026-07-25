@@ -247,34 +247,60 @@ fn process_still_running(pid: u32) -> bool {
 }
 
 fn spawn_via_shell_start(app_path: &Path, workdir: &Path) -> Result<Option<u32>, String> {
-    // cmd /C start "" /D "workdir" "exe"
-    let status = Command::new("cmd")
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    // CREATE_NO_WINDOW: hide the cmd.exe flash. /B: start app without a new console.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _child = Command::new("cmd")
         .args([
             "/C",
             "start",
             "",
+            "/B",
             "/D",
             &workdir.to_string_lossy(),
             &app_path.to_string_lossy(),
         ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| e.to_string())?;
     // `start` returns immediately; PID of cmd is not the WeCom PID.
-    let _ = status;
     Ok(None)
 }
 
 fn spawn_direct(app_path: &Path, workdir: &Path) -> Result<Option<u32>, String> {
     use std::os::windows::process::CommandExt;
-    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    use std::process::Stdio;
+    // WXWork is a GUI app — do NOT use CREATE_NEW_CONSOLE (causes black console flashes).
+    // DETACHED_PROCESS: no inherited console. CREATE_NO_WINDOW: belt-and-suspenders.
     const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     let child = Command::new(app_path)
         .current_dir(workdir)
-        .creation_flags(CREATE_NEW_CONSOLE | DETACHED_PROCESS)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(Some(child.id()))
+}
+
+/// Run console utilities (net.exe etc.) without a visible window flash.
+fn command_no_window(program: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut cmd = Command::new(program);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_NO_WINDOW);
+    cmd
 }
 
 fn enable_debug_privilege() -> bool {
@@ -405,7 +431,7 @@ pub fn list_safe_mode_users(count: u8, prefix: &str) -> Vec<crate::models::SafeM
 
 /// `net session` succeeds only when the process is elevated.
 pub fn is_elevated() -> bool {
-    Command::new("net")
+    command_no_window("net")
         .arg("session")
         .output()
         .map(|o| o.status.success())
@@ -473,16 +499,14 @@ pub fn check_safe_mode_health(
 }
 
 fn local_user_exists(username: &str) -> bool {
-    let output = Command::new("net")
-        .args(["user", username])
-        .output();
+    let output = command_no_window("net").args(["user", username]).output();
     matches!(output, Ok(o) if o.status.success())
 }
 
 fn create_local_user(username: &str, password: &str) -> Result<(), String> {
     // net user is the most portable admin path; requires elevated launcher.
-    let add = Command::new("net")
-        .args(["user", username, password, "/add", "/fullnamepasswordchg:yes", "/expires:never"])
+    let add = command_no_window("net")
+        .args(["user", username, password, "/add", "/passwordchg:yes", "/expires:never"])
         .output()
         .map_err(|e| format!("执行 net user 失败: {e}"))?;
 
@@ -497,7 +521,7 @@ fn create_local_user(username: &str, password: &str) -> Result<(), String> {
     }
 
     // Ensure Users group membership (usually automatic, but be explicit).
-    let _ = Command::new("net")
+    let _ = command_no_window("net")
         .args(["localgroup", "Users", username, "/add"])
         .output();
 
@@ -513,7 +537,7 @@ fn spawn_as_local_user(
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
-        CreateProcessWithLogonW, CREATE_NEW_CONSOLE, CREATE_UNICODE_ENVIRONMENT, LOGON_WITH_PROFILE,
+        CreateProcessWithLogonW, CREATE_UNICODE_ENVIRONMENT, LOGON_WITH_PROFILE,
         PROCESS_INFORMATION, STARTUPINFOW,
     };
 
@@ -561,6 +585,7 @@ fn spawn_as_local_user(
         si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
         let mut pi = PROCESS_INFORMATION::default();
 
+        // No CREATE_NEW_CONSOLE — avoids black console flashes; WeCom GUI window still shows.
         let ok = CreateProcessWithLogonW(
             PCWSTR(user_w.as_ptr()),
             PCWSTR(domain_w.as_ptr()),
@@ -568,7 +593,7 @@ fn spawn_as_local_user(
             LOGON_WITH_PROFILE,
             PCWSTR(app_w.as_ptr()),
             PWSTR(cmd_w.as_mut_ptr()),
-            CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE,
+            CREATE_UNICODE_ENVIRONMENT,
             None,
             PCWSTR(dir_w.as_ptr()),
             &si,

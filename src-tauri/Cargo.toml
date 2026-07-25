@@ -1,6 +1,6 @@
 [package]
 name = "wecom-multi-launcher"
-version = "0.1.6"
+version = "0.1.7"
 description = "Cross-platform WeCom multi-account launcher (Windows + macOS)"
 authors = ["you"]
 edition = "2021"
