@@ -17,9 +17,10 @@
 
 ## macOS
 
-- 在 `~/Library/Application Support/WeComLauncher/Instances/` 创建隔离副本（改 Bundle ID + 重签）  
+- 在 `~/Library/Application Support/WeComLauncher/Instances/` 创建隔离副本  
+- Bundle ID：`com.tencent.WeWorkMac.instanceN`，**保留 App Sandbox** 后 ad-hoc 重签  
+- 用 **`open -n`** 启动（直接 exec CEF 主程序会 GPU 崩溃退出）  
 - **不写入** `~/Applications`，避免启动台镜像  
-- 直接启动 Mach-O，并用 `lsregister -u` 取消索引  
 - 安装说明见 [MACOS.md](./MACOS.md)  
 
 ## 预期

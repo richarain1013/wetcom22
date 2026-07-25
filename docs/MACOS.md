@@ -16,18 +16,19 @@ Release 包为 **未公证** 的本地构建，macOS 会拦截。按下面做：
 
 ## 多开原理（当前版本）
 
-企微在 macOS 上会拦截「同一 Bundle 多开」，因此需要：
+企微在 macOS 上会拦截「同一 Bundle 多开」，且 CEF 内核不能用「直接跑 Mach-O」的方式启动（会 GPU 崩溃后退出）。因此需要：
 
 1. 在**隐藏目录**复制官方 `.app`：`~/Library/Application Support/WeComLauncher/Instances/`  
-2. 修改独立 `CFBundleIdentifier` 并重新签名  
-3. **直接启动可执行文件**（不放进 `~/Applications` / 启动台）
+2. 修改独立 `CFBundleIdentifier`（如 `com.tencent.WeWorkMac.instanceN`）  
+3. **保留 App Sandbox entitlement** 后 ad-hoc 重签 → 每个实例独立容器  
+4. 用 **`open -n`** 启动（不要直接 exec 主程序）
 
-旧版曾写入 `~/Applications/WeComMulti/`，启动器会自动清理。
+旧版曾写入 `~/Applications/WeComMulti/`，或用无沙盒/直启方式导致「闪一下就关」，启动器会自动重建坏副本。
 
 ## 使用
 
 1. 确认已安装官方「企业微信」  
 2. 打开 WeCom Launcher → 路径应自动识别  
-3. 点「新开 1 个」两次，应出现两个独立登录窗口  
-4. 首次多开会复制应用，稍等片刻  
-5. 每个窗口分别扫码登录  
+3. 点「新开 1 个」两次，应出现两个独立登录窗口（首次会复制+重签，约 10–30 秒）  
+4. 每个窗口分别扫码登录  
+5. 若仍闪退：完全退出企微后，删掉 `~/Library/Application Support/WeComLauncher/Instances/` 再试一次
