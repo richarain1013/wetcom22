@@ -82,10 +82,8 @@ pub fn prepare_next_instance(opts: &LaunchOptions) -> Result<String, String> {
         let _ = try_enable_multi_instances(crate::models::MAX_SLOTS as u32);
     }
 
-    // Always try to enable SeDebugPrivilege so we can open WXWork handles.
     let dbg = enable_debug_privilege();
     let elevated = is_elevated();
-
     let mut messages = Vec::new();
     if !elevated {
         messages.push("建议以管理员运行（否则可能无法释放互斥体）".into());
@@ -94,25 +92,19 @@ pub fn prepare_next_instance(opts: &LaunchOptions) -> Result<String, String> {
         messages.push("SeDebugPrivilege 未启用".into());
     }
 
-    // Retry: WeCom may recreate mutexes briefly after launch.
-    for attempt in 1..=5 {
-        match release_wecom_mutexes() {
-            Ok(msg) => {
-                messages.push(format!("#{attempt}:{msg}"));
-                if msg.contains("已释放") || msg.contains("未发现") {
-                    break;
-                }
-            }
-            Err(e) => messages.push(format!("#{attempt}:失败 {e}")),
-        }
-        std::thread::sleep(std::time::Duration::from_millis(250));
+    // Fast path: nothing running → skip expensive handle scan entirely.
+    let existing = wecom_main_pids();
+    if existing.is_empty() {
+        messages.push("无运行中企微，跳过互斥扫描".into());
+        return Ok(messages.join(" | "));
     }
 
-    if opts.windows_safe_mode {
-        return Ok(format!("安全模式准备 | {}", messages.join(" | ")));
+    // At most one quick release before launch (full system handle walk is costly).
+    match release_wecom_mutexes_budgeted(std::time::Duration::from_millis(2000)) {
+        Ok(msg) => messages.push(msg),
+        Err(e) => messages.push(format!("预释放: {e}")),
     }
-
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    std::thread::sleep(std::time::Duration::from_millis(200));
     Ok(messages.join(" | "))
 }
 
@@ -198,28 +190,20 @@ pub fn spawn_instance(
 
     match started {
         Ok(pid) => {
-            // After process starts, wait and close exclusive mutexes repeatedly so the
-            // next instance (and this one's helpers) are not blocked by re-created locks.
-            let mut posts = Vec::new();
-            for round in 1..=3 {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                let _ = enable_debug_privilege();
-                posts.push(format!(
-                    "r{round}:{}",
-                    release_wecom_mutexes().unwrap_or_default()
-                ));
-            }
+            // Brief wait then ONE budgeted mutex pass (old 3× full scans could hang for minutes).
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            let _ = enable_debug_privilege();
+            let post = release_wecom_mutexes_budgeted(std::time::Duration::from_millis(2500))
+                .unwrap_or_else(|e| format!("启动后释放跳过: {e}"));
 
-            // Confirm the process is still alive shortly after launch.
             if let Some(p) = pid {
-                std::thread::sleep(std::time::Duration::from_millis(800));
+                std::thread::sleep(std::time::Duration::from_millis(300));
                 if !process_still_running(p) {
                     return Ok(LaunchResult {
                         success: false,
                         pid: Some(p),
                         message: format!(
-                            "实例 #{index} PID={p} 启动后退出。请以管理员运行，并先完全退出企微后再试。| {}",
-                            posts.join(" | ")
+                            "实例 #{index} PID={p} 启动后退出。请以管理员运行，并先完全退出企微后再试。| {post}"
                         ),
                         index,
                     });
@@ -230,9 +214,8 @@ pub fn spawn_instance(
                 success: true,
                 pid,
                 message: format!(
-                    "已启动实例 #{index}{} | {}",
-                    pid.map(|p| format!(" PID={p}")).unwrap_or_default(),
-                    posts.join(" | ")
+                    "已启动实例 #{index}{} | {post}",
+                    pid.map(|p| format!(" PID={p}")).unwrap_or_default()
                 ),
                 index,
             })
@@ -247,10 +230,20 @@ pub fn spawn_instance(
 }
 
 fn process_still_running(pid: u32) -> bool {
-    use sysinfo::{Pid, ProcessesToUpdate, System};
-    let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
-    sys.process(Pid::from_u32(pid)).is_some()
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    const STILL_ACTIVE: u32 = 259;
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code).is_ok();
+        let _ = CloseHandle(handle);
+        ok && code == STILL_ACTIVE
+    }
 }
 
 fn spawn_via_shell_start(app_path: &Path, workdir: &Path) -> Result<Option<u32>, String> {
@@ -613,17 +606,60 @@ fn spawn_as_local_user(
     }
 }
 
+/// Prefer main WXWork.exe PIDs — helpers have huge handle tables and are irrelevant for mutex.
+fn wecom_main_pids() -> Vec<u32> {
+    use sysinfo::{ProcessesToUpdate, System};
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    let mut pids = Vec::new();
+    for (pid, process) in sys.processes() {
+        let name = process.name().to_string_lossy().to_string();
+        let exe = process
+            .exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let hay = format!("{name} {exe}").to_ascii_lowercase();
+        if hay.contains("wecom-multi-launcher") || hay.contains("wecom launcher") {
+            continue;
+        }
+        let is_main = name.eq_ignore_ascii_case("WXWork.exe")
+            || name.eq_ignore_ascii_case("WXWork")
+            || exe.to_ascii_lowercase().ends_with("\\wxwork.exe")
+            || exe.to_ascii_lowercase().ends_with("/wxwork.exe");
+        if is_main {
+            pids.push(pid.as_u32());
+        }
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    // Fallback: any WeCom-matched process if name filter found nothing.
+    if pids.is_empty() {
+        return crate::platform::list_wecom_pids();
+    }
+    pids
+}
+
 fn release_wecom_mutexes() -> Result<String, String> {
-    let pids = crate::platform::list_wecom_pids();
+    release_wecom_mutexes_budgeted(std::time::Duration::from_millis(2500))
+}
+
+fn release_wecom_mutexes_budgeted(budget: std::time::Duration) -> Result<String, String> {
+    let pids = wecom_main_pids();
     if pids.is_empty() {
         return Ok("未发现运行中的企业微信，可直接启动".into());
     }
 
+    let deadline = std::time::Instant::now() + budget;
+    let mutant_ty = mutant_type_index();
     let mut closed = 0usize;
     let mut errors = Vec::new();
 
     for pid in pids {
-        match close_mutex_handles_for_pid(pid) {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        let remain = deadline.saturating_duration_since(std::time::Instant::now());
+        match close_mutex_handles_for_pid(pid, mutant_ty, remain) {
             Ok(n) => closed += n,
             Err(e) => errors.push(format!("PID {pid}: {e}")),
         }
@@ -643,7 +679,12 @@ fn release_wecom_mutexes() -> Result<String, String> {
     }
 }
 
-fn close_mutex_handles_for_pid(pid: u32) -> Result<usize, String> {
+fn close_mutex_handles_for_pid(
+    pid: u32,
+    mutant_ty: Option<u16>,
+    budget: std::time::Duration,
+) -> Result<usize, String> {
+    let deadline = std::time::Instant::now() + budget;
     unsafe {
         let process = OpenProcess(
             PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
@@ -652,34 +693,58 @@ fn close_mutex_handles_for_pid(pid: u32) -> Result<usize, String> {
         )
         .map_err(|e| format!("OpenProcess 失败: {e}（需要管理员权限？）"))?;
 
-        let handles = enumerate_handles(pid)?;
+        // Handle-table walk itself can be slow — time-box it.
+        let enum_budget = std::cmp::min(budget, std::time::Duration::from_millis(1500));
+        let entries = enumerate_handle_entries_timed(pid, enum_budget)?;
         let mut closed = 0usize;
         let current = GetCurrentProcess();
+        let mut name_queries = 0usize;
+        const MAX_NAME_QUERIES: usize = 120;
 
-        for handle_value in handles {
-            if let Some(name) = query_object_name(process, handle_value) {
-                if MUTEX_HINTS
-                    .iter()
-                    .any(|h| name.to_ascii_lowercase().contains(&h.to_ascii_lowercase()))
-                {
-                    let mut local = HANDLE::default();
-                    if DuplicateHandle(
-                        process,
-                        HANDLE(handle_value as *mut _),
-                        current,
-                        &mut local,
-                        0,
-                        false,
-                        DUPLICATE_CLOSE_SOURCE,
-                    )
-                    .is_ok()
-                    {
-                        if !local.is_invalid() {
-                            let _ = CloseHandle(local);
-                        }
-                        closed += 1;
-                    }
+        for (handle_value, type_index) in entries {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            // Only inspect Mutant handles when we know the type index.
+            if let Some(m) = mutant_ty {
+                if type_index != m {
+                    continue;
                 }
+            } else {
+                // No type filter available — hard-cap name queries to avoid multi-minute hangs.
+                if name_queries >= MAX_NAME_QUERIES {
+                    break;
+                }
+            }
+
+            name_queries += 1;
+            let Some(name) = query_object_name_timed(process, handle_value, 30) else {
+                continue;
+            };
+            let lower = name.to_ascii_lowercase();
+            if !MUTEX_HINTS
+                .iter()
+                .any(|h| lower.contains(&h.to_ascii_lowercase()))
+            {
+                continue;
+            }
+
+            let mut local = HANDLE::default();
+            if DuplicateHandle(
+                process,
+                HANDLE(handle_value as *mut _),
+                current,
+                &mut local,
+                0,
+                false,
+                DUPLICATE_CLOSE_SOURCE,
+            )
+            .is_ok()
+            {
+                if !local.is_invalid() {
+                    let _ = CloseHandle(local);
+                }
+                closed += 1;
             }
         }
 
@@ -729,9 +794,40 @@ extern "system" {
     ) -> i32;
 }
 
-unsafe fn enumerate_handles(pid: u32) -> Result<Vec<usize>, String> {
+fn mutant_type_index() -> Option<u16> {
+    use std::sync::OnceLock;
+    static IDX: OnceLock<Option<u16>> = OnceLock::new();
+    *IDX.get_or_init(|| unsafe { probe_mutant_type_index() })
+}
+
+unsafe fn probe_mutant_type_index() -> Option<u16> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::CreateMutexW;
+
+    let name: Vec<u16> = "Local\\WeComLauncher_MutantProbe\0"
+        .encode_utf16()
+        .collect();
+    let mutex = CreateMutexW(None, false, PCWSTR(name.as_ptr())).ok()?;
+    let self_pid = std::process::id();
+    let target = mutex.0 as usize;
+    let mut found = None;
+    if let Ok(entries) = enumerate_handle_entries(self_pid) {
+        for (hv, ty) in entries {
+            // Handle values are often compared in the low 32/16 bits depending on OS.
+            if hv == target || hv == (target & 0xffff) || hv == (target & 0xffff_ffff) {
+                found = Some(ty);
+                break;
+            }
+        }
+    }
+    let _ = CloseHandle(mutex);
+    found
+}
+
+unsafe fn enumerate_handle_entries(pid: u32) -> Result<Vec<(usize, u16)>, String> {
     let mut size = 1024 * 1024usize;
-    for _ in 0..5 {
+    for _ in 0..6 {
         let mut buf = vec![0u8; size];
         let mut ret = 0u32;
         let status = NtQuerySystemInformation(
@@ -742,6 +838,10 @@ unsafe fn enumerate_handles(pid: u32) -> Result<Vec<usize>, String> {
         );
         if status == STATUS_INFO_LENGTH_MISMATCH {
             size = (ret as usize).saturating_mul(2).max(size * 2);
+            // Soft cap ~64MB to avoid multi-minute allocations on huge systems.
+            if size > 64 * 1024 * 1024 {
+                return Err("系统句柄表过大，跳过本次扫描".into());
+            }
             continue;
         }
         if status != 0 {
@@ -756,12 +856,45 @@ unsafe fn enumerate_handles(pid: u32) -> Result<Vec<usize>, String> {
             let entry_ptr = base.add(i * entry_size) as *const SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX;
             let entry = ptr::read_unaligned(entry_ptr);
             if entry.unique_process_id as u32 == pid {
-                out.push(entry.handle_value);
+                out.push((entry.handle_value, entry.object_type_index));
             }
         }
         return Ok(out);
     }
     Err("句柄枚举缓冲区不足".into())
+}
+
+fn enumerate_handle_entries_timed(
+    pid: u32,
+    budget: std::time::Duration,
+) -> Result<Vec<(usize, u16)>, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = unsafe { enumerate_handle_entries(pid) };
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(budget) {
+        Ok(r) => r,
+        Err(_) => Err(format!(
+            "句柄枚举超时（{}ms），已跳过以免卡住启动",
+            budget.as_millis()
+        )),
+    }
+}
+
+/// Query object name on a background thread with timeout — NtQueryObject can block forever.
+fn query_object_name_timed(process: HANDLE, remote_handle: usize, timeout_ms: u64) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    // HANDLEs are just pointer-sized values; move copies into the worker.
+    let process_bits = process.0 as usize;
+    std::thread::spawn(move || {
+        let process = HANDLE(process_bits as *mut _);
+        let name = unsafe { query_object_name(process, remote_handle) };
+        let _ = tx.send(name);
+    });
+    rx.recv_timeout(std::time::Duration::from_millis(timeout_ms))
+        .ok()
+        .flatten()
 }
 
 unsafe fn query_object_name(process: HANDLE, remote_handle: usize) -> Option<String> {

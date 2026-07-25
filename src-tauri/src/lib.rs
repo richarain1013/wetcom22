@@ -80,10 +80,23 @@ async fn launch_batch_inner(options: LaunchOptions) -> Result<BatchResult, Strin
             policy.wait_before_next().await;
         }
 
-        match platform::prepare_next_instance(&options) {
+        match tokio::task::spawn_blocking({
+            let options = options.clone();
+            move || platform::prepare_next_instance(&options)
+        })
+        .await
+        .map_err(|e| format!("准备任务失败: {e}"))?
+        {
             Ok(msg) => {
                 let tier = options.tier_for_index(tier_pos);
-                let mut one = platform::spawn_instance(&app, index, &options)?;
+                // Windows mutex walking is sync & heavy — keep UI/async runtime free.
+                let app2 = app.clone();
+                let opts2 = options.clone();
+                let mut one = tokio::task::spawn_blocking(move || {
+                    platform::spawn_instance(&app2, index, &opts2)
+                })
+                .await
+                .map_err(|e| format!("启动任务失败: {e}"))??;
                 if one.success {
                     platform::note_slot_pid(index, one.pid);
                 }
