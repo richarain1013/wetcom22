@@ -56,7 +56,8 @@ pub struct LaunchOptions {
     pub max_delay_ms: u64,
     #[serde(default = "default_true")]
     pub prefer_registry: bool,
-    #[serde(default = "default_true")]
+    /// Deprecated: macOS no longer clones .app (Launchpad clutter). Kept for API compat; ignored.
+    #[serde(default)]
     pub macos_clone_instances: bool,
     #[serde(default)]
     pub windows_safe_mode: bool,
@@ -88,7 +89,7 @@ impl Default for LaunchOptions {
             min_delay_ms: 2500,
             max_delay_ms: 6000,
             prefer_registry: true,
-            macos_clone_instances: true,
+            macos_clone_instances: false,
             windows_safe_mode: false,
             safe_mode_password: None,
             safe_mode_user_prefix: default_safe_prefix(),

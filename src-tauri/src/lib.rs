@@ -10,6 +10,10 @@ use policy::{clamp_count, tier_presets, LaunchPolicy};
 
 #[tauri::command]
 fn get_app_info(app_path: Option<String>) -> AppInfo {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = platform::cleanup_legacy_clones();
+    }
     let resolved = platform::resolve_app_path(app_path.as_deref());
     let pids = platform::list_wecom_pids();
     AppInfo {
@@ -135,6 +139,18 @@ fn get_tier_presets() -> Vec<TierPreset> {
     tier_presets()
 }
 
+#[tauri::command]
+fn cleanup_macos_clones() -> usize {
+    #[cfg(target_os = "macos")]
+    {
+        platform::cleanup_legacy_clones()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        0
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -150,7 +166,8 @@ pub fn run() {
             prepare_safe_mode_users,
             list_safe_mode_users,
             check_safe_mode_health,
-            get_tier_presets
+            get_tier_presets,
+            cleanup_macos_clones
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

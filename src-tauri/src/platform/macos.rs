@@ -1,6 +1,5 @@
-//! macOS backend: clone .app with unique Bundle ID + isolated HOME,
-//! or lightweight `open -n` on the original app.
-//! Zero injection into WeCom.
+//! macOS backend: multi-open via `open -n` on the official app only.
+//! Never clones .app into ~/Applications (avoids Launchpad clutter).
 
 use crate::models::{LaunchOptions, LaunchResult};
 use std::fs;
@@ -29,25 +28,46 @@ pub fn resolve_app_path(override_path: Option<&str>) -> Option<PathBuf> {
 }
 
 pub fn prepare_next_instance(_opts: &LaunchOptions) -> Result<String, String> {
-    // macOS does not use the Windows ExclusiveObject mutex path.
-    Ok("macOS：准备启动新实例".into())
+    // Best-effort cleanup of legacy clones from older launcher versions.
+    let cleaned = cleanup_legacy_clones();
+    if cleaned > 0 {
+        Ok(format!("macOS：已清理 {cleaned} 个旧镜像，准备 open -n 启动"))
+    } else {
+        Ok("macOS：使用 open -n 启动官方企业微信（不创建镜像）".into())
+    }
 }
 
 pub fn spawn_instance(
     app_path: &Path,
     index: u8,
-    opts: &LaunchOptions,
+    _opts: &LaunchOptions,
 ) -> Result<LaunchResult, String> {
-    if opts.macos_clone_instances {
-        spawn_cloned(app_path, index)
-    } else {
-        spawn_open_n(app_path, index)
+    // Prefer launching the Mach-O binary directly; falls back to `open -n`.
+    if let Ok(exe) = find_macos_executable(app_path) {
+        match Command::new(&exe).spawn() {
+            Ok(child) => {
+                let pid = child.id();
+                return Ok(LaunchResult {
+                    success: true,
+                    pid: Some(pid),
+                    message: format!("已启动实例 #{index} PID={pid}（官方客户端，无镜像）"),
+                    index,
+                });
+            }
+            Err(e) => {
+                // fall through to open -n
+                let _ = e;
+            }
+        }
     }
+
+    spawn_open_n(app_path, index)
 }
 
 fn spawn_open_n(app_path: &Path, index: u8) -> Result<LaunchResult, String> {
     let status = Command::new("open")
         .arg("-n")
+        .arg("-a")
         .arg(app_path)
         .status()
         .map_err(|e| format!("open -n 失败: {e}"))?;
@@ -55,8 +75,8 @@ fn spawn_open_n(app_path: &Path, index: u8) -> Result<LaunchResult, String> {
     if status.success() {
         Ok(LaunchResult {
             success: true,
-            pid: None, // `open` returns quickly; PID belongs to LaunchServices
-            message: format!("已通过 open -n 启动实例 #{index}"),
+            pid: None,
+            message: format!("已通过 open -n 启动实例 #{index}（官方客户端，无镜像）"),
             index,
         })
     } else {
@@ -69,100 +89,38 @@ fn spawn_open_n(app_path: &Path, index: u8) -> Result<LaunchResult, String> {
     }
 }
 
-fn instances_root() -> PathBuf {
+/// Remove clones created by older versions under ~/Applications/WeComMulti.
+pub fn cleanup_legacy_clones() -> usize {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-    home.join("Applications").join("WeComMulti")
-}
+    let root = home.join("Applications").join("WeComMulti");
+    if !root.exists() {
+        return 0;
+    }
 
-fn instance_data_root(index: u8) -> PathBuf {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-    home.join("Library")
+    let mut n = 0usize;
+    if let Ok(entries) = fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("app") {
+                if fs::remove_dir_all(&path).is_ok() {
+                    n += 1;
+                }
+            }
+        }
+    }
+    // Remove empty folder if possible
+    let _ = fs::remove_dir(&root);
+
+    // Also clear old per-instance HOME stubs (optional data dirs)
+    let data = home
+        .join("Library")
         .join("Application Support")
-        .join("WeComLauncher")
-        .join(format!("instance-{index}"))
-}
-
-fn spawn_cloned(source_app: &Path, index: u8) -> Result<LaunchResult, String> {
-    let instance_app = create_app_clone(source_app, index)?;
-    let data_home = instance_data_root(index);
-    fs::create_dir_all(&data_home).map_err(|e| format!("创建数据目录失败: {e}"))?;
-    fs::create_dir_all(data_home.join("tmp")).ok();
-    fs::create_dir_all(data_home.join("Documents")).ok();
-
-    let exe = find_macos_executable(&instance_app)?;
-
-    let child = Command::new(&exe)
-        .env("HOME", &data_home)
-        .env("TMPDIR", data_home.join("tmp"))
-        .spawn()
-        .or_else(|_| {
-            Command::new("open")
-                .arg("-n")
-                .arg(&instance_app)
-                .spawn()
-        })
-        .map_err(|e| format!("启动克隆实例失败: {e}"))?;
-
-    let pid = child.id();
-    Ok(LaunchResult {
-        success: true,
-        pid: Some(pid),
-        message: format!(
-            "已启动克隆实例 #{index} PID={pid} ({})",
-            instance_app.display()
-        ),
-        index,
-    })
-}
-
-fn create_app_clone(source_app: &Path, index: u8) -> Result<PathBuf, String> {
-    let root = instances_root();
-    fs::create_dir_all(&root).map_err(|e| format!("创建实例目录失败: {e}"))?;
-
-    let stem = source_app
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("WeCom");
-    let dest = root.join(format!("{stem}-{index}.app"));
-
-    if dest.exists() {
-        // Reuse existing clone for faster subsequent launches
-        return Ok(dest);
+        .join("WeComLauncher");
+    if data.exists() {
+        let _ = fs::remove_dir_all(&data);
     }
 
-    let status = Command::new("cp")
-        .arg("-R")
-        .arg(source_app)
-        .arg(&dest)
-        .status()
-        .map_err(|e| format!("复制 .app 失败: {e}"))?;
-    if !status.success() {
-        return Err("复制 .app 失败".into());
-    }
-
-    let plist = dest.join("Contents/Info.plist");
-    let bundle_id = format!("com.tencent.WeWorkMac.launcher{index}");
-    let _ = Command::new("/usr/libexec/PlistBuddy")
-        .arg("-c")
-        .arg(format!("Set :CFBundleIdentifier {bundle_id}"))
-        .arg(&plist)
-        .status();
-
-    let _ = Command::new("/usr/bin/xattr")
-        .arg("-rc")
-        .arg(&dest)
-        .status();
-
-    let _ = Command::new("codesign")
-        .arg("--force")
-        .arg("--deep")
-        .arg("--sign")
-        .arg("-")
-        .arg("--timestamp=none")
-        .arg(&dest)
-        .output();
-
-    Ok(dest)
+    n
 }
 
 fn find_macos_executable(app: &Path) -> Result<PathBuf, String> {

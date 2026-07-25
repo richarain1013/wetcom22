@@ -10,15 +10,17 @@
 ## Windows
 
 - 优先软写 `HKCU\...\multi_instances`  
-- 再进程外 `DuplicateHandle(DUPLICATE_CLOSE_SOURCE)` 释放 ExclusiveObject  
-- 失败时提示提权，默认不以管理员常驻  
-- **安全模式（推荐加强）**：每槽位一个本地用户（`WeComSlotN`），`CreateProcessWithLogonW` 拉起企微，配置目录隔离。详见 [SAFE_MODE.md](./SAFE_MODE.md)  
+- 再进程外释放 ExclusiveObject（扩展名称匹配）  
+- 用 `cmd start` / 独立控制台拉起，更接近双击启动  
+- 每次启动前短暂等待，降低第二实例被吸回的概率  
+- **安全模式**：每槽位本地用户，见 [SAFE_MODE.md](./SAFE_MODE.md)  
 
 ## macOS
 
-- **克隆模式（默认，适合 8–10）**：`~/Applications/WeComMulti/` 下独立 `.app` + 独立 `HOME`  
-- **轻量模式**：`open -n` 原应用（实现简单，数据隔离较弱）  
-- 不依赖 Windows 那套 Mutex  
+- **仅**使用官方 `/Applications/企业微信.app`：`open -n` 或直接跑二进制  
+- **不再克隆** `.app` 到 `~/Applications`（避免启动台一堆镜像）  
+- 启动时自动清理旧版残留镜像  
+- 安装说明见 [MACOS.md](./MACOS.md)  
 
 ## 预期
 

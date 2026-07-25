@@ -19,6 +19,8 @@ const MUTEX_HINTS: &[&str] = &[
     "Tencent.WeWork.ExclusiveObject",
     "Tencent.WeWork.ExclusiveObjectInstance",
     "Tencent.WeWork.Exclusive",
+    "WeWorkExclusive",
+    "WXWorkExclusive",
 ];
 
 pub fn resolve_app_path(override_path: Option<&str>) -> Option<PathBuf> {
@@ -73,14 +75,17 @@ fn try_enable_multi_instances(max: u32) -> bool {
 
 pub fn prepare_next_instance(opts: &LaunchOptions) -> Result<String, String> {
     if opts.windows_safe_mode {
-        // Per-user profiles still share the interactive session mutex namespace on many builds.
         let release = release_wecom_mutexes()?;
+        std::thread::sleep(std::time::Duration::from_millis(250));
         return Ok(format!("安全模式准备 | {release}"));
     }
     if opts.prefer_registry {
         let _ = try_enable_multi_instances(crate::models::MAX_SLOTS as u32);
     }
-    release_wecom_mutexes()
+    let release = release_wecom_mutexes()?;
+    // Give the first instance a moment after mutex close before the next CreateProcess.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    Ok(release)
 }
 
 pub fn spawn_instance(
@@ -97,19 +102,21 @@ pub fn spawn_instance(
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let mut cmd = Command::new(app_path);
-    cmd.current_dir(&workdir);
+    // Prefer shell `start` so the process tree matches a normal user double-click,
+    // then fall back to direct CreateProcess.
+    let started = spawn_via_shell_start(app_path, &workdir)
+        .or_else(|_| spawn_direct(app_path, &workdir));
 
-    match cmd.spawn() {
-        Ok(child) => {
-            let pid = child.id();
-            Ok(LaunchResult {
-                success: true,
-                pid: Some(pid),
-                message: format!("已启动实例 #{index} PID={pid}"),
-                index,
-            })
-        }
+    match started {
+        Ok(pid) => Ok(LaunchResult {
+            success: true,
+            pid,
+            message: format!(
+                "已启动实例 #{index}{}",
+                pid.map(|p| format!(" PID={p}")).unwrap_or_default()
+            ),
+            index,
+        }),
         Err(e) => Ok(LaunchResult {
             success: false,
             pid: None,
@@ -117,6 +124,37 @@ pub fn spawn_instance(
             index,
         }),
     }
+}
+
+fn spawn_via_shell_start(app_path: &Path, workdir: &Path) -> Result<Option<u32>, String> {
+    // cmd /C start "" /D "workdir" "exe"
+    let status = Command::new("cmd")
+        .args([
+            "/C",
+            "start",
+            "",
+            "/D",
+            &workdir.to_string_lossy(),
+            &app_path.to_string_lossy(),
+        ])
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    // `start` returns immediately; PID of cmd is not the WeCom PID.
+    let _ = status;
+    Ok(None)
+}
+
+fn spawn_direct(app_path: &Path, workdir: &Path) -> Result<Option<u32>, String> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+    let child = Command::new(app_path)
+        .current_dir(workdir)
+        .creation_flags(CREATE_NEW_CONSOLE | DETACHED_PROCESS)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(Some(child.id()))
 }
 
 /// Create local users WeComSlot1..N if missing. Requires administrator.

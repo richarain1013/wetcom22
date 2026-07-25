@@ -10,7 +10,6 @@ type LaunchOptions = {
   minDelayMs: number;
   maxDelayMs: number;
   preferRegistry: boolean;
-  macosCloneInstances: boolean;
   windowsSafeMode: boolean;
   safeModePassword: string | null;
   safeModeUserPrefix: string;
@@ -104,11 +103,9 @@ const els = {
   safePrefix: document.getElementById("safePrefix") as HTMLInputElement,
   safePassword: document.getElementById("safePassword") as HTMLInputElement,
   safeHealth: document.getElementById("safeHealth")!,
-  macosClone: document.getElementById("macosClone") as HTMLInputElement,
   winOpt: document.getElementById("winOpt")!,
   winSafeOpt: document.getElementById("winSafeOpt")!,
   safeModePanel: document.getElementById("safeModePanel")!,
-  macOpt: document.getElementById("macOpt")!,
   runningCount: document.getElementById("runningCount")!,
   slotsBody: document.getElementById("slotsBody")!,
   logs: document.getElementById("logs")!,
@@ -229,7 +226,6 @@ function options(count: number): LaunchOptions {
     minDelayMs: Number(els.minDelay.value) || 2500,
     maxDelayMs: Number(els.maxDelay.value) || 6000,
     preferRegistry: els.preferRegistry.checked,
-    macosCloneInstances: els.macosClone.checked,
     windowsSafeMode: els.windowsSafeMode.checked,
     safeModePassword: els.safePassword.value || null,
     safeModeUserPrefix: els.safePrefix.value.trim() || "WeComSlot",
@@ -310,7 +306,6 @@ async function refreshInfo() {
   const isWin = info.platform === "windows";
   els.winOpt.style.display = isWin ? "" : "none";
   els.winSafeOpt.style.display = isWin ? "" : "none";
-  els.macOpt.style.display = info.platform === "macos" ? "" : "none";
   els.adminBadge.textContent = info.isAdmin ? "管理员" : "普通权限";
   els.adminBadge.className = info.isAdmin ? "badge running" : "badge idle";
   syncSafePanel();
